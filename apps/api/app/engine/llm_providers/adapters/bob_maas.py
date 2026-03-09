@@ -17,8 +17,16 @@ class BobMaasProvider(LLMProvider):
     北京银行 (Bank of Beijing) MaaS 平台适配器。
 
     接口为 OpenAI 兼容格式，通过 ``?body_format=openai`` 指定。
-    base_url 应为完整端点，例如：
-        http://maasapp.aip.bj.bob.test:8080/apis/ais/qwen3-32b
+
+    URL 结构: {base_url}/{endpoint_suffix}?body_format=openai
+    - base_url: 例如 http://maasapp.aip.bj.bob.test:8080/apis/ais
+    - endpoint_suffix: 从 LLMModel.defaults.endpoint_suffix 读取，fallback 到 model_id
+
+    配置示例（在 LLMModel.defaults 中）:
+        {
+            "endpoint_suffix": "qwen3-30b-a",
+            "temperature": 0.7
+        }
     """
 
     def __init__(self, api_key: str, base_url: str):
@@ -27,13 +35,22 @@ class BobMaasProvider(LLMProvider):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
-    def _build_url(self) -> str:
-        return f"{self.base_url}?body_format=openai"
+    def _build_url(self, request: LLMRequest) -> str:
+        """
+        构建请求 URL。
+
+        endpoint_suffix 优先从 request.extra_params 读取，
+        如果未配置则 fallback 到 request.model_id。
+        """
+        endpoint_suffix = request.extra_params.get("endpoint_suffix") if request.extra_params else None
+        if not endpoint_suffix:
+            endpoint_suffix = request.model_id
+        return f"{self.base_url}/{endpoint_suffix}?body_format=openai"
 
     def _build_headers(self) -> dict:
         return {
             "Content-Type": "application/json",
-            "Authorization": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
         }
 
     def _build_body(self, request: LLMRequest, *, stream: bool = False) -> dict:
@@ -58,7 +75,7 @@ class BobMaasProvider(LLMProvider):
     # ── 非流式 ───────────────────────────────────────────
 
     def complete(self, request: LLMRequest) -> LLMResponse:
-        url = self._build_url()
+        url = self._build_url(request)
         headers = self._build_headers()
         body = self._build_body(request)
 
@@ -95,7 +112,7 @@ class BobMaasProvider(LLMProvider):
     # ── 流式 ─────────────────────────────────────────────
 
     def stream(self, request: LLMRequest) -> Generator[LLMStreamChunk, None, None]:
-        url = self._build_url()
+        url = self._build_url(request)
         headers = self._build_headers()
         body = self._build_body(request, stream=True)
 
