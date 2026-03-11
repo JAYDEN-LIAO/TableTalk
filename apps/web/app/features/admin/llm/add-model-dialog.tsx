@@ -18,14 +18,18 @@ interface AddModelDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providerId: string;
+  providerType: string;
 }
 
-export const AddModelDialog = ({ open, onOpenChange, providerId }: AddModelDialogProps) => {
+export const AddModelDialog = ({ open, onOpenChange, providerId, providerType }: AddModelDialogProps) => {
   const [name, setName] = useState("");
   const [modelId, setModelId] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
+  const [endpointSuffix, setEndpointSuffix] = useState("");
 
   const createModel = useCreateModel();
+
+  const isBeijingBank = providerType === "beijingbank";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,16 +51,23 @@ export const AddModelDialog = ({ open, onOpenChange, providerId }: AddModelDialo
         }
       }
 
+      const defaults: Record<string, unknown> = {};
+      if (isBeijingBank && endpointSuffix.trim()) {
+        defaults.endpoint_suffix = endpointSuffix.trim();
+      }
+
       await createModel.mutateAsync({
         provider_id: providerId,
         name: name.trim(),
         model_id: modelId.trim(),
         limits,
+        defaults: Object.keys(defaults).length > 0 ? defaults : undefined,
       });
       toast.success("模型创建成功");
       setName("");
       setModelId("");
       setMaxTokens("");
+      setEndpointSuffix("");
       onOpenChange(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "创建失败");
@@ -110,6 +121,21 @@ export const AddModelDialog = ({ open, onOpenChange, providerId }: AddModelDialo
                 可选，模型最大 Token 数
               </p>
             </div>
+
+            {isBeijingBank && (
+              <div className="grid gap-2">
+                <Label htmlFor="endpoint-suffix">Endpoint Suffix</Label>
+                <Input
+                  id="endpoint-suffix"
+                  placeholder="例如: qwen3-30b-a"
+                  value={endpointSuffix}
+                  onChange={(e) => setEndpointSuffix(e.target.value)}
+                />
+                <p className="text-muted-foreground text-xs">
+                  URL 路径后缀，用于构建 API 地址。如未填写则使用模型 ID
+                </p>
+              </div>
+            )}
           </div>
 
           <DialogFooter>
