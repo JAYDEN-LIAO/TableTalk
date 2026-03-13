@@ -9,7 +9,7 @@ import type { Route } from "./+types/$";
 
 export function meta({ }: Route.MetaArgs) {
   return [
-    { title: "404 - Selgetabel" },
+    { title: "404 - 智算数据处理系统" },
     { name: "description", content: "页面不存在" },
   ];
 }
@@ -342,7 +342,7 @@ const NotFoundPage = () => {
       >
         <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
           <span className="inline-block size-2 rounded-full bg-brand/60" />
-          <span className="font-medium">Selgetabel · AI 驱动的 Excel 智能处理</span>
+          <span className="font-medium">智算数据处理系统 · AI 驱动的 Excel 智能处理</span>
         </div>
       </footer>
     </main>

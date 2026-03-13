@@ -1,4 +1,4 @@
-# Selgetabel 设计系统
+#智算数据处理系统/Selgetabel 设计系统
 
 适用范围：`apps/web` 前端应用
 
