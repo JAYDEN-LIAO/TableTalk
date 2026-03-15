@@ -4,12 +4,13 @@ import { useMemo } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Logo } from "~/components/logo";
+import { getProductName, getProductDescription, BOB_RELEASE } from "~/lib/branding";
 
 import type { Route } from "./+types/$";
 
 export function meta({ }: Route.MetaArgs) {
   return [
-    { title: "404 - 智算数据处理系统" },
+    { title: `404 - ${getProductName()}` },
     { name: "description", content: "页面不存在" },
   ];
 }
@@ -279,7 +280,11 @@ const NotFoundPage = () => {
       <div className="absolute top-4 left-0 px-6 flex items-center gap-3 opacity-0" style={{ animation: "fadeUp 0.5s ease-out forwards" }}>
         <Logo size={44} />
         <span className="text-2xl font-bold tracking-tight text-foreground">
-          Selge<span className="text-brand">tabel</span>
+          {BOB_RELEASE ? getProductName() : (
+            <>
+              Selge<span className="text-brand">tabel</span>
+            </>
+          )}
         </span>
       </div>
 
@@ -342,7 +347,7 @@ const NotFoundPage = () => {
       >
         <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
           <span className="inline-block size-2 rounded-full bg-brand/60" />
-          <span className="font-medium">智算数据处理系统 · AI 驱动的 Excel 智能处理</span>
+          <span className="font-medium">{getProductName()} · {getProductDescription()}</span>
         </div>
       </footer>
     </main>

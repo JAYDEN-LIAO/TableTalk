@@ -16,9 +16,13 @@ RUN pnpm install --frozen-lockfile --filter web...
 
 FROM deps AS build
 
+# BOB 版本构建参数
+ARG BOB_RELEASE=false
+
 COPY apps/web/ /repo/apps/web/
 
-RUN pnpm --filter web build
+# 传入 BOB_RELEASE 环境变量进行构建
+RUN BOB_RELEASE=${BOB_RELEASE} pnpm --filter web build
 
 FROM base AS runner
 

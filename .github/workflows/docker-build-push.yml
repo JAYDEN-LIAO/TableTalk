@@ -93,7 +93,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 9. 输出构建信息
+      # 9. 构建并推送 BOB Web 镜像（中文版）
+      - name: Build and push BOB Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BOB_RELEASE=true
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/selgetabel-bob-web:${{ steps.tags.outputs.version }}
+            ${{ (github.ref_type == 'tag' || github.event.inputs.push_latest == 'true') && format('{0}/selgetabel-bob-web:latest', env.DOCKER_USERNAME) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 10. 输出构建信息
       - name: Output build info
         run: |
           echo "=========================================="
@@ -104,9 +120,11 @@ jobs:
           echo "镜像列表:"
           echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-api:${{ steps.tags.outputs.version }}"
           echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-web:${{ steps.tags.outputs.version }}"
+          echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-bob-web:${{ steps.tags.outputs.version }}"
           if [[ "${{ github.ref_type }}" == "tag" ]] || [[ "${{ github.event.inputs.push_latest }}" == "true" ]]; then
             echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-api:latest"
             echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-web:latest"
+            echo "  - ${{ env.DOCKER_USERNAME }}/selgetabel-bob-web:latest"
           fi
           echo ""
           echo "支持架构: linux/amd64, linux/arm64"
