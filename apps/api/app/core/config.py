@@ -64,5 +64,8 @@ class Settings(BaseSettings):
     # LLM 机密信息加密密钥（Fernet），迁移期可为空
     LLM_SECRET_KEY: Optional[str] = None
 
+    # BOB 发布版本（特定人员使用的中文版本）
+    BOB_RELEASE: bool = False
+
 
 settings = Settings()

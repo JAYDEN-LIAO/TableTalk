@@ -6,14 +6,18 @@ import { reactRouter } from "@react-router/dev/vite";
 
 export default defineConfig(({ mode }) => {
 
-  const envs = loadEnv('development', process.cwd(), '')
+  const envs = loadEnv(mode, process.cwd(), '')
 
-  const API_BASE_URL = envs.API_BASE_URL;
+  const API_BASE_URL = envs.API_BASE_URL || "http://localhost:8000";
+  const BOB_RELEASE = process.env.BOB_RELEASE === "true";
 
   return {
     plugins: [tailwindcss(), reactRouter(), tsconfigPaths(), svgr()],
     ssr: {
       noExternal: [/^@lobehub\//, /^@emoji-mart\//, /^emoji-mart/],
+    },
+    define: {
+      "import.meta.env.VITE_BOB_RELEASE": JSON.stringify(BOB_RELEASE),
     },
     server: {
       proxy: {
