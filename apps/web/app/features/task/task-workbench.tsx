@@ -13,6 +13,7 @@ import { getThreadDetail } from '~/lib/api'
 import ChatPanel, { type ChatPanelHandle } from './chat-panel'
 import PreviewPanel from './preview-panel'
 import { getLatestOutputFilesFromTurns } from './history-output-files'
+import { extractRecordBlocks, extractReplaySteps, extractResponseText } from './turn-records'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '~/components/ui/resizable'
 import {
   AlertDialog,
@@ -177,35 +178,8 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
         } satisfies UserMessage)
 
         // 添加助手消息
-        let turnSteps = (turn.steps || []).map((step) => {
-          const baseStep = {
-            step: step.step as StepName,
-            started_at: step.started_at,
-            completed_at: step.completed_at,
-          }
-
-          if (step.status === 'done' && step.output) {
-            return { ...baseStep, status: 'done' as const, output: step.output }
-          }
-          if (step.status === 'error' && step.error) {
-            return { ...baseStep, status: 'error' as const, error: step.error as StepError }
-          }
-          if (step.status === 'streaming') {
-            return { ...baseStep, status: 'streaming' as const }
-          }
-          return { ...baseStep, status: 'running' as const }
-        }) as StepRecord[]
-
-        // Chat 轮次：steps 为空但有 response_text，构造 chat step 用于渲染
-        if (turnSteps.length === 0 && turn.response_text) {
-          turnSteps = [{
-            step: 'chat' as StepName,
-            status: 'done' as const,
-            started_at: turn.created_at,
-            completed_at: turn.completed_at ?? turn.created_at,
-            output: turn.response_text,
-          } as StepRecord]
-        }
+        const turnSteps = extractReplaySteps(turn.steps || [])
+        const recordBlocks = extractRecordBlocks(turn.steps || [])
 
         // 判断助手消息状态
         let assistantStatus: AssistantMessage['status'] = 'done'
@@ -229,6 +203,8 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
           role: 'assistant',
           status: hasStepError ? 'error' : assistantStatus,
           steps: turnSteps,
+          recordBlocks,
+          responseText: extractResponseText(turn),
           error: hasStepError ? errorMessage : undefined,
           completed: turn.completed_at ? dayjs(turn.completed_at).unix() : undefined,
         }

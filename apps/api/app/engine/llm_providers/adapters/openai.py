@@ -1,5 +1,6 @@
 """OpenAI / OpenAI 兼容 Provider"""
 
+import json
 from typing import Generator, Optional
 
 from openai import OpenAI
@@ -32,12 +33,38 @@ class OpenAIProvider(LLMProvider):
             params["max_tokens"] = request.max_tokens
         if request.response_format:
             params["response_format"] = request.response_format
+        if request.tools:
+            params["tools"] = request.tools
+        if request.tool_choice is not None:
+            params["tool_choice"] = request.tool_choice
         if extra_headers:
             params["extra_headers"] = extra_headers
 
         response = self.client.chat.completions.create(**params)
-        content = response.choices[0].message.content or ""
-        return LLMResponse(content=content.strip(), raw=response, usage=getattr(response, "usage", None))
+        message = response.choices[0].message
+        content = message.content or ""
+        tool_calls = None
+        if getattr(message, "tool_calls", None):
+            tool_calls = []
+            for tool_call in message.tool_calls:
+                arguments = tool_call.function.arguments
+                try:
+                    arguments = json.loads(arguments)
+                except Exception:
+                    pass
+                tool_calls.append(
+                    {
+                        "id": getattr(tool_call, "id", None),
+                        "name": tool_call.function.name,
+                        "arguments": arguments,
+                    }
+                )
+        return LLMResponse(
+            content=content.strip(),
+            tool_calls=tool_calls,
+            raw=response,
+            usage=getattr(response, "usage", None),
+        )
 
     def stream(self, request: LLMRequest) -> Generator[LLMStreamChunk, None, None]:
         extra_params = request.extra_params or {}
@@ -55,6 +82,10 @@ class OpenAIProvider(LLMProvider):
             params["max_tokens"] = request.max_tokens
         if request.response_format:
             params["response_format"] = request.response_format
+        if request.tools:
+            params["tools"] = request.tools
+        if request.tool_choice is not None:
+            params["tool_choice"] = request.tool_choice
         if extra_headers:
             params["extra_headers"] = extra_headers
 

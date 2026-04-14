@@ -9,12 +9,15 @@ from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
-from app.persistence.turn_repository import TurnRepository
-from app.engine.intent_classifier import IntentType
 from app.models.thread import ThreadTurn, Thread
 from app.models.file import File
+from app.persistence.turn_repository import TurnRepository
 
 logger = logging.getLogger(__name__)
+
+CHAT_INTENT = "chat"
+ANALYSIS_INTENT = "analysis"
+PROCESSING_INTENT = "processing"
 
 
 class ContextService:
@@ -59,15 +62,15 @@ class ContextService:
             )
             
             # 根据意图类型构建特定上下文
-            if intent_type == IntentType.CHAT.value:
+            if intent_type == CHAT_INTENT:
                 context_data = await self._build_chat_context(
                     history_turns, current_query, file_ids
                 )
-            elif intent_type == IntentType.ANALYSIS.value:
+            elif intent_type == ANALYSIS_INTENT:
                 context_data = await self._build_analysis_context(
                     history_turns, current_query, file_ids
                 )
-            elif intent_type == IntentType.PROCESSING.value:
+            elif intent_type == PROCESSING_INTENT:
                 context_data = await self._build_processing_context(
                     history_turns, current_query, file_ids
                 )
@@ -256,7 +259,7 @@ class ContextService:
         # 构建对话历史
         for turn in history_turns:
             turn_dict = self._turn_to_dict(turn)
-            if turn.intent_type == IntentType.CHAT.value:
+            if turn.intent_type == CHAT_INTENT:
                 context["conversation_history"].append({
                     "role": "user",
                     "content": turn.user_query,
@@ -296,7 +299,7 @@ class ContextService:
         
         # 提取历史分析记录
         for turn in history_turns:
-            if turn.intent_type == IntentType.ANALYSIS.value:
+            if turn.intent_type == ANALYSIS_INTENT:
                 analysis_record = self._turn_to_dict(turn)
                 
                 # 从steps中提取分析结果
@@ -360,7 +363,7 @@ class ContextService:
         
         # 提取操作历史
         for turn in history_turns:
-            if turn.intent_type == IntentType.PROCESSING.value:
+            if turn.intent_type == PROCESSING_INTENT:
                 operation_record = self._turn_to_dict(turn)
                 
                 # 从steps中提取操作详情

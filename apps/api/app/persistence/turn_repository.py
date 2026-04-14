@@ -277,6 +277,19 @@ class TurnRepository:
             flag_modified(turn, "steps")
             await self.db.flush()
 
+    async def replace_turn_steps(
+        self,
+        turn_id: UUID,
+        steps: list,
+    ) -> None:
+        stmt = select(ThreadTurn).where(ThreadTurn.id == turn_id)
+        result = await self.db.execute(stmt)
+        turn = result.scalar_one_or_none()
+        if turn:
+            turn.steps = make_json_serializable(steps)
+            flag_modified(turn, "steps")
+            await self.db.flush()
+
     async def mark_processing(self, turn_id: UUID, tracker: StepTracker) -> None:
         """
         标记 turn 为处理中
@@ -364,6 +377,33 @@ class TurnRepository:
 
         await self.db.flush()
 
+    async def finalize_turn(
+        self,
+        turn_id: UUID,
+        thread_id: UUID,
+        status: str,
+        has_error: bool = False,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+
+        turn_stmt = select(ThreadTurn).where(ThreadTurn.id == turn_id)
+        turn_result = await self.db.execute(turn_stmt)
+        turn = turn_result.scalar_one_or_none()
+        if turn:
+            turn.status = status
+            if status == "completed":
+                turn.completed_at = now
+
+        thread_stmt = select(Thread).where(Thread.id == thread_id)
+        thread_result = await self.db.execute(thread_stmt)
+        thread = thread_result.scalar_one_or_none()
+        if thread:
+            thread.updated_at = now
+            if has_error or status == "failed":
+                thread.health_status = "error"
+
+        await self.db.flush()
+
     async def update_context_snapshot(
         self,
         turn_id: UUID,
@@ -399,6 +439,30 @@ class TurnRepository:
         except Exception as e:
             logger.error(f"更新上下文快照失败: {e}", exc_info=True)
             return False
+
+    async def update_turn_response_text(
+        self,
+        turn_id: UUID,
+        response_text: str,
+    ) -> None:
+        stmt = select(ThreadTurn).where(ThreadTurn.id == turn_id)
+        result = await self.db.execute(stmt)
+        turn = result.scalar_one_or_none()
+        if turn:
+            turn.response_text = response_text
+            await self.db.flush()
+
+    async def update_turn_intent_type(
+        self,
+        turn_id: UUID,
+        intent_type: str,
+    ) -> None:
+        stmt = select(ThreadTurn).where(ThreadTurn.id == turn_id)
+        result = await self.db.execute(stmt)
+        turn = result.scalar_one_or_none()
+        if turn:
+            turn.intent_type = intent_type
+            await self.db.flush()
 
     async def commit(self) -> None:
         """提交事务"""

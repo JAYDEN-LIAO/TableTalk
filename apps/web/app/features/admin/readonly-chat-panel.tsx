@@ -10,6 +10,7 @@ import { Button } from '~/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '~/components/ui/dialog'
 
 import UserMessageCard from '~/features/task/user-message-card'
+import { extractRecordBlocks, extractReplaySteps, extractResponseText } from '~/features/task/turn-records'
 import { StepItem } from '~/components/step-item'
 import ExcelPreview from '~/components/excel-preview'
 import InsightCard from '~/components/insight-card'
@@ -42,6 +43,16 @@ export interface AssistantMessage {
   role: 'assistant'
   /** 处理步骤 */
   steps: StepRecord[]
+  /** 通用 agent records */
+  recordBlocks?: Array<{
+    type: 'text' | 'reasoning' | 'tool_call'
+    text?: string
+    toolName?: string
+    arguments?: Record<string, unknown>
+    createdAt?: string
+  }>
+  /** 最终回复文本 */
+  responseText?: string
   /** 本轮状态 */
   status: 'pending' | 'streaming' | 'done' | 'error'
   /** 错误信息 */
@@ -85,32 +96,8 @@ export interface ReadOnlyChatPanelProps {
  * 将 ThreadTurn 转换为 ConversationTurn
  */
 function convertThreadTurnToConversation(turn: ThreadTurn): ConversationTurn {
-  const steps: StepRecord[] = turn.steps.map((step: ThreadTurnStep) => {
-    const baseStep: StepRecord = {
-      step: step.step as any,
-      status: step.status as any,
-      started_at: step.started_at,
-      completed_at: step.completed_at,
-    }
-
-    if (step.step === 'chat' || step.step === 'execute') {
-      return { ...baseStep, output: step.output } as any
-    } else {
-      return { ...baseStep, output: step.output, error: step.error } as any
-    }
-  })
-
-  // 如果没有 chat 步骤但有 response_text，添加一个 chat 步骤
-  const hasChatStep = steps.some(s => s.step === 'chat')
-  if (!hasChatStep && turn.response_text) {
-    steps.push({
-      step: 'chat',
-      status: 'done',
-      output: turn.response_text,
-      started_at: turn.created_at,
-      completed_at: turn.completed_at,
-    } as StepRecord)
-  }
+  const steps: StepRecord[] = extractReplaySteps(turn.steps)
+  const recordBlocks = extractRecordBlocks(turn.steps)
 
   const outputFiles: OutputFileInfo[] = []
   // 从 execute 步骤提取 strategy 和 manual_steps
@@ -145,6 +132,8 @@ function convertThreadTurnToConversation(turn: ThreadTurn): ConversationTurn {
     id: `${turn.id}_assistant`,
     role: 'assistant',
     steps,
+    recordBlocks,
+    responseText: extractResponseText(turn),
     status,
     outputFiles,
     strategy,
@@ -253,6 +242,11 @@ const TurnRenderer = ({ turn, userAvatar, isActive }: { turn: ConversationTurn; 
   }, [assistantMessage])
 
   const hasSteps = assistantMessage && assistantMessage.steps.length > 0
+  const recordBlocks = assistantMessage?.recordBlocks ?? []
+  const hasChatStep = assistantMessage?.steps.some(s => s.step === 'chat') ?? false
+  const persistedResponseText = assistantMessage?.responseText && !hasChatStep
+    ? assistantMessage.responseText
+    : undefined
   const isAllDone = assistantMessage?.status === 'done' && hasSteps
   const hasError = assistantMessage?.status === 'error' || assistantMessage?.steps.some(s => s.status === 'error')
   const hasOutputFiles = assistantMessage && assistantMessage.outputFiles.length > 0
@@ -315,6 +309,45 @@ const TurnRenderer = ({ turn, userAvatar, isActive }: { turn: ConversationTurn; 
       {/* AI 响应 */}
       {assistantMessage && (
         <>
+          {recordBlocks.length > 0 && (
+            <section className="space-y-2">
+              {recordBlocks.map((record, index) => {
+                if (record.type === 'tool_call') {
+                  return (
+                    <div
+                      key={`record-${record.type}-${index}`}
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+                    >
+                      调用工具: <span className="font-medium text-slate-800">{record.toolName}</span>
+                    </div>
+                  )
+                }
+
+                return (
+                  <div
+                    key={`record-${record.type}-${index}`}
+                    className={cn(
+                      "text-sm leading-relaxed py-2 px-1",
+                      record.type === 'reasoning' ? "text-slate-500 italic" : "text-gray-800"
+                    )}
+                  >
+                    <Streamdown mode="static">
+                      {record.text ?? ''}
+                    </Streamdown>
+                  </div>
+                )
+              })}
+            </section>
+          )}
+
+          {persistedResponseText && (
+            <div className="text-sm text-gray-800 leading-relaxed py-2 px-1">
+              <Streamdown mode="static">
+                {persistedResponseText}
+              </Streamdown>
+            </div>
+          )}
+
           {/* 步骤列表 */}
           {hasSteps && (
             <section className="space-y-2">

@@ -292,10 +292,16 @@ export interface ThreadListResponse {
 
 /** 步骤记录（与 STEPS_STORAGE_SPEC 对齐） */
 export interface ThreadTurnStep {
-  step: string;
+  type?: string;
+  step?: string;
+  tool_name?: string;
+  arguments?: Record<string, unknown>;
+  text?: string;
   status: string;
   output?: Record<string, unknown>;
   error?: { code: string; message: string };
+  stage_id?: string;
+  created_at?: string;
   started_at?: string;
   completed_at?: string;
 }

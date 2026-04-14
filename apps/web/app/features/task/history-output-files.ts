@@ -4,7 +4,11 @@ import type { ExportStepOutput, OutputFileInfo } from '~/components/llm-chat/mes
 export function getLatestOutputFilesFromTurns(turns: ThreadTurn[]): OutputFileInfo[] {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index]
-    const exportStep = turn.steps?.find(step => step.step === 'export' && step.status === 'done')
+    const exportStep = turn.steps?.find(step => {
+      const isLegacyExport = step.step === 'export' && step.status === 'done'
+      const isAgentExport = step.type === 'tool_result' && step.step === 'export' && step.status === 'done'
+      return isLegacyExport || isAgentExport
+    })
     if (!exportStep?.output) {
       continue
     }

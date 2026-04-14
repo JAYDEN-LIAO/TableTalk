@@ -1,4 +1,4 @@
-"""聊天流式响应"""
+"""Chat response adapters for the unified /chat orchestrator."""
 
 import asyncio
 import logging
@@ -8,7 +8,6 @@ from uuid import UUID
 from sse_starlette.sse import ServerSentEvent
 
 from app.core.sse import sse
-from app.engine.intent_classifier import IntentType
 from app.services.chat_service import get_chat_service
 
 logger = logging.getLogger(__name__)
@@ -19,9 +18,11 @@ async def stream_chat_response(
     query: str,
     user_id: UUID,
     thread_id: Optional[str],
-    intent_result: dict,
+    assistant_decision: dict,
     db,
     file_ids: List[str],
+    emit_session: bool = True,
+    persist_turn: bool = True,
 ) -> AsyncGenerator[ServerSentEvent, None]:
     """
     处理聊天/澄清分支的流式响应。
@@ -44,13 +45,13 @@ async def stream_chat_response(
         )
         actual_thread_id = str(thread.id)
 
-    # 发送 session 事件（含真实 thread_id）
-    yield sse(
-        {"thread_id": actual_thread_id, "intent": intent_result.get("intent")},
-        event="session",
-    )
+    if emit_session:
+        yield sse(
+            {"thread_id": actual_thread_id, "intent": assistant_decision.get("intent", "chat")},
+            event="session",
+        )
 
-    reply_text = intent_result.get("clarification_question")
+    reply_text = assistant_decision.get("response_text")
 
     if reply_text:
         yield sse({"step": "chat", "status": "running"}, event="message")
@@ -65,20 +66,21 @@ async def stream_chat_response(
             event="message",
         )
 
-        try:
-            await chat_service._save_conversation_turn(
-                thread_id=UUID(actual_thread_id),
-                query=query,
-                response=reply_text,
-                db_session=db,
-                user_id=user_id,
-                file_ids=file_ids
-            )
-            logger.info(f"✅ 澄清轮次及文件关联已落库: thread={actual_thread_id}, files={file_ids}")
-        except Exception as e:
-            logger.error(f"❌ 保存澄清轮次失败: {e}", exc_info=True)
+        if persist_turn:
+            try:
+                await chat_service._save_conversation_turn(
+                    thread_id=UUID(actual_thread_id),
+                    query=query,
+                    response=reply_text,
+                    db_session=db,
+                    user_id=user_id,
+                    file_ids=file_ids
+                )
+                logger.info(f"✅ 澄清轮次及文件关联已落库: thread={actual_thread_id}, files={file_ids}")
+            except Exception as e:
+                logger.error(f"❌ 保存澄清轮次失败: {e}", exc_info=True)
 
-    elif intent_result.get("intent") == IntentType.CHAT.value:
+    elif assistant_decision.get("tool_name") == "conversation_response":
         yield sse({"step": "chat", "status": "running"}, event="message")
         full_reply = ""
         try:
@@ -114,16 +116,17 @@ async def stream_chat_response(
             event="message",
         )
         
-        try:
-            await chat_service._save_conversation_turn(
-                thread_id=UUID(actual_thread_id),
-                query=query,
-                response=fallback_msg,
-                db_session=db,
-                user_id=user_id,
-                file_ids=file_ids
-            )
-        except Exception as e:
-            logger.error(f"❌ 保存兜底澄清轮次失败: {e}", exc_info=True)
+        if persist_turn:
+            try:
+                await chat_service._save_conversation_turn(
+                    thread_id=UUID(actual_thread_id),
+                    query=query,
+                    response=fallback_msg,
+                    db_session=db,
+                    user_id=user_id,
+                    file_ids=file_ids
+                )
+            except Exception as e:
+                logger.error(f"❌ 保存兜底澄清轮次失败: {e}", exc_info=True)
 
     yield sse({"step": "complete", "status": "done"}, event="message")

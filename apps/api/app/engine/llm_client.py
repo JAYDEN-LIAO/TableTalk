@@ -2,11 +2,12 @@
 
 import logging
 import asyncio
-from typing import Optional, Dict, List, Generator, Tuple, AsyncGenerator
+from typing import Optional, Dict, List, Generator, Tuple, AsyncGenerator, Any
 from app.engine.llm_providers import ProviderRegistry
 from app.engine.llm_types import (
     LLMStageConfig,
     LLMRequest,
+    LLMResponse,
 )
 from app.engine.prompt import (
     get_analysis_prompt_with_schema,
@@ -50,6 +51,9 @@ class LLMClient:
         self,
         stage_config: LLMStageConfig,
         messages: List[Dict[str, str]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> LLMRequest:
         defaults = stage_config.model.defaults or {}
         # 合并 extra_params，支持 provider 特定参数（如 endpoint_suffix）
@@ -62,6 +66,8 @@ class LLMClient:
             temperature=defaults.get("temperature", 0),
             max_tokens=defaults.get("max_tokens"),
             response_format=defaults.get("response_format"),
+            tools=tools,
+            tool_choice=tool_choice,
             extra_params=extra_params,
         )
 
@@ -135,6 +141,38 @@ class LLMClient:
         logger.info(f"\n[LLM 响应内容]\n{result}")
 
         return result
+
+    def call_llm_with_tools(
+        self,
+        stage: str,
+        system_prompt: str,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        tool_choice: Any = "required",
+    ) -> LLMResponse:
+        stage_config = self._resolve_stage_config(stage)
+        provider = stage_config.provider
+        model = stage_config.model
+
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        logger.info(
+            "\n[LLM 调用] Tool Calling\n[阶段] %s\n[Provider] %s (%s)\n[模型] %s\n[消息数] %d\n[工具数] %d\n",
+            stage,
+            provider.name,
+            provider.type,
+            model.model_id,
+            len(full_messages),
+            len(tools),
+        )
+
+        request = self._build_request(
+            stage_config,
+            full_messages,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        adapter = self.provider_registry.get_adapter(provider)
+        return adapter.complete(request)
 
     def _call_llm_stream(
         self,

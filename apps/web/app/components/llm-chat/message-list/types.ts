@@ -180,6 +180,16 @@ export interface AssistantMessage {
   status: AssistantMessageStatus;
   /** 步骤列表（核心数据）*/
   steps: StepRecord[];
+  /** 非 step 的通用 agent records（text / reasoning / tool_call） */
+  recordBlocks?: Array<{
+    type: 'text' | 'reasoning' | 'tool_call';
+    text?: string;
+    toolName?: string;
+    arguments?: Record<string, unknown>;
+    createdAt?: string;
+  }>;
+  /** 最终回复文本（历史 turn 独立渲染，不再依赖 chat step） */
+  responseText?: string;
   /** 全局错误信息（会话级/系统级错误）*/
   error?: string;
   /** 完成时间戳 */

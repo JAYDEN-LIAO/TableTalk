@@ -8,9 +8,11 @@ import logging
 from typing import Dict, List, Optional, Any
 from uuid import UUID
 
-from app.engine.intent_classifier import IntentType
-
 logger = logging.getLogger(__name__)
+
+CHAT_INTENT = "chat"
+ANALYSIS_INTENT = "analysis"
+PROCESSING_INTENT = "processing"
 
 
 class ContextBuilder:
@@ -58,15 +60,15 @@ class ContextBuilder:
         """
         try:
             # 根据意图类型选择构建方法
-            if intent_type == IntentType.CHAT.value:
+            if intent_type == CHAT_INTENT:
                 return self._build_chat_prompt_context(
                     context_data, current_query, current_files
                 )
-            elif intent_type == IntentType.ANALYSIS.value:
+            elif intent_type == ANALYSIS_INTENT:
                 return self._build_analysis_prompt_context(
                     context_data, current_query, current_files
                 )
-            elif intent_type == IntentType.PROCESSING.value:
+            elif intent_type == PROCESSING_INTENT:
                 return self._build_processing_prompt_context(
                     context_data, current_query, current_files
                 )

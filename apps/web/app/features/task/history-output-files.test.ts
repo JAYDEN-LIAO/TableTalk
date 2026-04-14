@@ -56,6 +56,50 @@ test('returns the latest available exported files even when the newest turn has 
   ])
 })
 
+test('reads exported files from new agent tool_result records', () => {
+  const turns: ThreadTurn[] = [
+    {
+      id: 'turn-1',
+      turn_number: 1,
+      user_query: '处理这个文件',
+      status: 'completed',
+      steps: [
+        {
+          type: 'tool_call',
+          tool_name: 'processing_workflow',
+          status: 'done',
+          created_at: '2026-03-11T10:00:00Z',
+        },
+        {
+          type: 'tool_result',
+          step: 'export',
+          tool_name: 'processing_workflow',
+          status: 'done',
+          output: {
+            output_files: [
+              {
+                file_id: 'file-1',
+                filename: 'result.xlsx',
+                url: '/outputs/result.xlsx',
+              },
+            ],
+          },
+        },
+      ],
+      created_at: '2026-03-11T10:00:00Z',
+      completed_at: '2026-03-11T10:00:10Z',
+    },
+  ]
+
+  assert.deepEqual(getLatestOutputFilesFromTurns(turns), [
+    {
+      file_id: 'file-1',
+      filename: 'result.xlsx',
+      url: '/outputs/result.xlsx',
+    },
+  ])
+})
+
 test('prefers the most recent exported files when multiple turns contain export results', () => {
   const turns: ThreadTurn[] = [
     {

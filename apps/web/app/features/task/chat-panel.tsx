@@ -36,6 +36,16 @@ export interface AssistantMessage {
   role: 'assistant'
   /** 处理步骤 */
   steps: StepRecord[]
+  /** 通用 agent records */
+  recordBlocks?: Array<{
+    type: 'text' | 'reasoning' | 'tool_call'
+    text?: string
+    toolName?: string
+    arguments?: Record<string, unknown>
+    createdAt?: string
+  }>
+  /** 最终回复文本 */
+  responseText?: string
   /** 本轮状态 */
   status: 'pending' | 'streaming' | 'done' | 'error'
   /** 错误信息 */
@@ -323,6 +333,11 @@ const TurnRenderer = ({
 
   // 状态判断
   const hasSteps = assistantMessage && assistantMessage.steps.length > 0
+  const recordBlocks = assistantMessage?.recordBlocks ?? []
+  const hasChatStep = assistantMessage?.steps.some(s => s.step === 'chat') ?? false
+  const persistedResponseText = assistantMessage?.responseText && !hasChatStep
+    ? assistantMessage.responseText
+    : undefined
   const isAllDone = assistantMessage?.status === 'done' && hasSteps
   const hasError = assistantMessage?.status === 'error' || assistantMessage?.steps.some(s => s.status === 'error')
   const hasOutputFiles = assistantMessage && assistantMessage.outputFiles.length > 0
@@ -363,6 +378,45 @@ const TurnRenderer = ({
       {/* AI 响应 */}
       {assistantMessage && (
         <>
+          {recordBlocks.length > 0 && (
+            <section className="space-y-2">
+              {recordBlocks.map((record, index) => {
+                if (record.type === 'tool_call') {
+                  return (
+                    <div
+                      key={`record-${record.type}-${index}`}
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+                    >
+                      调用工具: <span className="font-medium text-slate-800">{record.toolName}</span>
+                    </div>
+                  )
+                }
+
+                return (
+                  <div
+                    key={`record-${record.type}-${index}`}
+                    className={cn(
+                      "text-sm leading-relaxed py-2 px-1",
+                      record.type === 'reasoning' ? "text-slate-500 italic" : "text-gray-800"
+                    )}
+                  >
+                    <Streamdown mode="static">
+                      {record.text ?? ''}
+                    </Streamdown>
+                  </div>
+                )
+              })}
+            </section>
+          )}
+
+          {persistedResponseText && (
+            <div className="text-sm text-gray-800 leading-relaxed py-2 px-1">
+              <Streamdown mode="static">
+                {persistedResponseText}
+              </Streamdown>
+            </div>
+          )}
+
           {/* 步骤列表 */}
           {hasSteps && (
             <section className="space-y-2">
