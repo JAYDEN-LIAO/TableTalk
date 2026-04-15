@@ -2,6 +2,7 @@
 
 提供统一的 Excel 处理流程，生成标准化的 SSE 事件流。
 """
+import hashlib
 import json
 import asyncio
 import logging
@@ -157,6 +158,10 @@ async def _export_modified_files(
             # 生成对象名称
             object_name = f"{path_prefix}/{timestamp}/{filename}"
 
+            # 计算文件大小和 MD5
+            file_size = len(excel_bytes)
+            md5_hash = hashlib.md5(excel_bytes).hexdigest()
+
             # 上传到 OSS
             public_url = upload_file(
                 data=excel_bytes,
@@ -165,7 +170,14 @@ async def _export_modified_files(
             )
 
             output_files.append(
-                {"file_id": file_id, "filename": filename, "url": public_url}
+                {
+                    "file_id": file_id,
+                    "filename": filename,
+                    "url": public_url,
+                    "object_name": object_name,
+                    "file_size": file_size,
+                    "md5": md5_hash,
+                }
             )
 
         except Exception as e:

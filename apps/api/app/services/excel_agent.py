@@ -81,7 +81,10 @@ class ExcelAgent:
         tool_executor: Any,
     ) -> AsyncGenerator[ServerSentEvent, None]:
         history_messages = await self._load_history_messages(thread_id, db_session)
-        file_schema_lines = await self._extract_schema_info(file_ids, db_session, user_id)
+        # 合并历史文件与当前请求文件，避免后续 turn 丢失文件上下文
+        historical_file_ids = await self._get_thread_file_ids(thread_id, db_session)
+        all_file_ids = list({*(str(fid) for fid in file_ids), *historical_file_ids})
+        file_schema_lines = await self._extract_schema_info(all_file_ids, db_session, user_id)
         messages = history_messages + [{"role": "user", "content": query}]
         turn_context = await self._ensure_turn_context(
             thread_id=thread_id,
@@ -101,11 +104,11 @@ class ExcelAgent:
                 decision = self._choose_decision(
                     query=query,
                     file_schema_lines=file_schema_lines,
-                    file_ids=file_ids,
+                    file_ids=all_file_ids,
                     messages=messages,
                 )
                 if not decision:
-                    decision = self._native_tool_call_failure_decision(file_ids=file_ids)
+                    decision = self._native_tool_call_failure_decision(file_ids=all_file_ids)
 
                 if current_thread_id and not session_emitted:
                     yield sse(turn_context["session_payload"], event="session")
@@ -125,7 +128,7 @@ class ExcelAgent:
                         user_id=user_id,
                         thread_id=current_thread_id,
                         db=db_session,
-                        file_ids=file_ids,
+                        file_ids=all_file_ids,
                         emit_session=emit_session,
                         persist_turn=True,
                         existing_turn_id=current_turn_id,
@@ -137,6 +140,7 @@ class ExcelAgent:
                             repo=turn_context["repo"],
                             turn_id=current_turn_id,
                             tool_name=decision["tool_name"],
+                            user_id=user_id,
                         )
                     # Note: turn persistence is handled by stream_chat_response
                     # via _save_conversation_turn (persist_turn=True, existing_turn_id=current_turn_id).
@@ -156,7 +160,7 @@ class ExcelAgent:
                     user_id=user_id,
                     thread_id=current_thread_id,
                     db=db_session,
-                    file_ids=file_ids,
+                    file_ids=all_file_ids,
                     emit_session=emit_session,
                     persist_turn=False,
                 ):
@@ -171,6 +175,7 @@ class ExcelAgent:
                         repo=turn_context["repo"],
                         turn_id=current_turn_id,
                         tool_name=decision["tool_name"],
+                        user_id=user_id,
                     )
 
                 observation = {
@@ -182,14 +187,14 @@ class ExcelAgent:
                 messages.append({"role": "tool", "content": self._format_tool_observation(observation)})
         except Exception as exc:
             logger.warning("ExcelAgent stream loop failed: %s", exc)
-            fallback = self._native_tool_call_failure_decision(file_ids=file_ids)
+            fallback = self._native_tool_call_failure_decision(file_ids=all_file_ids)
             async for event in tool_executor.execute(
                 decision=fallback,
                 query=query,
                 user_id=user_id,
                 thread_id=current_thread_id,
                 db=db_session,
-                file_ids=file_ids,
+                file_ids=all_file_ids,
                 emit_session=False,
                 persist_turn=False,
             ):
@@ -200,6 +205,7 @@ class ExcelAgent:
                     repo=turn_context["repo"],
                     turn_id=current_turn_id,
                     tool_name=fallback["tool_name"],
+                    user_id=user_id,
                 )
             if turn_context["repo"] is not None and current_turn_id is not None and current_thread_id is not None:
                 await turn_context["repo"].update_turn_response_text(current_turn_id, fallback.get("response_text", ""))
@@ -326,6 +332,30 @@ class ExcelAgent:
                 messages.append({"role": "assistant", "content": turn.response_text})
         return messages
 
+    async def _get_thread_file_ids(
+        self,
+        thread_id: Optional[str],
+        db_session: Optional[AsyncSession],
+    ) -> List[str]:
+        """获取线程历史中所有关联文件的 ID（含 output 文件）"""
+        if not thread_id or not db_session:
+            return []
+        try:
+            repo = TurnRepository(db_session)
+            recent_turns = await repo.get_thread_turns(UUID(thread_id), with_files=True)
+        except Exception as exc:
+            logger.warning("加载线程文件失败: %s", exc)
+            return []
+        file_ids: List[str] = []
+        seen: set[str] = set()
+        for turn in recent_turns:
+            for f in turn.files:
+                fid = str(f.id)
+                if fid not in seen:
+                    seen.add(fid)
+                    file_ids.append(fid)
+        return file_ids
+
     async def _ensure_turn_context(
         self,
         *,
@@ -389,6 +419,7 @@ class ExcelAgent:
         repo: Optional[TurnRepository],
         turn_id: Optional[UUID],
         tool_name: str,
+        user_id: Optional[UUID] = None,
     ) -> None:
         if repo is None or turn_id is None:
             return
@@ -424,6 +455,26 @@ class ExcelAgent:
             elif status == "done":
                 record["output"] = payload.get("output")
                 record["completed_at"] = payload.get("completed_at") or self._now()
+                # 当 export 步骤完成时，保存输出文件到数据库
+                if step == "export" and user_id is not None:
+                    export_output = payload.get("output")
+                    if export_output and isinstance(export_output, dict):
+                        output_files = export_output.get("output_files", [])
+                        if output_files:
+                            files_to_save = []
+                            for item in output_files:
+                                url = item.get("url", "")
+                                # 从 URL 提取 object_name（格式: /{minio_base}/{bucket}/{object_name}）
+                                object_name = url.split("/", 3)[-1] if url else ""
+                                files_to_save.append({
+                                    "filename": item.get("filename", "output.xlsx"),
+                                    "object_name": object_name,
+                                    "file_size": item.get("file_size", 0),
+                                    "md5": item.get("md5", "0" * 32),
+                                })
+                            if files_to_save:
+                                await repo.save_output_files_to_turn(turn_id, files_to_save, user_id)
+                                await repo.commit()
             elif status == "error":
                 record["error"] = payload.get("error")
                 record["completed_at"] = payload.get("completed_at") or self._now()
@@ -439,6 +490,24 @@ class ExcelAgent:
             record["output"] = payload.get("output")
             record["completed_at"] = payload.get("completed_at") or self._now()
             record.pop("streaming_content", None)
+            if step == "export" and user_id is not None:
+                export_output = payload.get("output")
+                if export_output and isinstance(export_output, dict):
+                    output_files = export_output.get("output_files", [])
+                    if output_files:
+                        files_to_save = []
+                        for item in output_files:
+                            url = item.get("url", "")
+                            object_name = url.split("/", 3)[-1] if url else ""
+                            files_to_save.append({
+                                "filename": item.get("filename", "output.xlsx"),
+                                "object_name": object_name,
+                                "file_size": item.get("file_size", 0),
+                                "md5": item.get("md5", "0" * 32),
+                            })
+                        if files_to_save:
+                            await repo.save_output_files_to_turn(turn_id, files_to_save, user_id)
+                            await repo.commit()
         elif status == "error":
             record["error"] = payload.get("error")
             record["completed_at"] = payload.get("completed_at") or self._now()

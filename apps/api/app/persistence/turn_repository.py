@@ -223,6 +223,7 @@ class TurnRepository:
                 id=uuid4(),
                 turn_id=turn_id,
                 file_id=file_id,
+                role="input",
             )
             self.db.add(turn_file)
             linked_ids.append(file_id)
@@ -463,6 +464,51 @@ class TurnRepository:
         if turn:
             turn.intent_type = intent_type
             await self.db.flush()
+
+    async def save_output_files_to_turn(
+        self,
+        turn_id: UUID,
+        output_files: List[dict],
+        user_id: UUID,
+    ) -> None:
+        """
+        将处理 workflow 产生的输出文件保存到数据库并关联到 turn。
+
+        Args:
+            turn_id: 目标 turn ID
+            output_files: [{file_id, filename, url, object_name, file_size, md5}, ...]
+            user_id: 所属用户 ID
+        """
+        from app.models.file import File
+        from app.models.thread import TurnFile
+
+        for item in output_files:
+            try:
+                # 创建新的 File 记录（输出文件是新的 OSS 对象）
+                file_record = File(
+                    id=uuid4(),
+                    user_id=user_id,
+                    filename=item["filename"],
+                    file_path=item["object_name"],
+                    file_size=item.get("file_size", 0),
+                    md5=item.get("md5", "0000000000000000000000000000000"),
+                    mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    uploaded_at=datetime.now(timezone.utc),
+                )
+                self.db.add(file_record)
+                await self.db.flush()
+
+                # 关联到 turn，role="output"
+                turn_file = TurnFile(
+                    id=uuid4(),
+                    turn_id=turn_id,
+                    file_id=file_record.id,
+                    role="output",
+                )
+                self.db.add(turn_file)
+                await self.db.flush()
+            except Exception as e:
+                logger.warning(f"保存输出文件失败: {e}")
 
     async def commit(self) -> None:
         """提交事务"""

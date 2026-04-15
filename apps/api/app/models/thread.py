@@ -161,6 +161,7 @@ class TurnFile(Base):
         nullable=False,
         index=True,
     )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="input")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
