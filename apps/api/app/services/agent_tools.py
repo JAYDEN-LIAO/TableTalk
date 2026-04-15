@@ -145,6 +145,7 @@ class ToolExecutor:
         file_ids: List[str],
         emit_session: bool = True,
         persist_turn: bool = True,
+        existing_turn_id: Optional[str] = None,
     ) -> AsyncGenerator[ServerSentEvent, None]:
         tool_name = decision["tool_name"]
 
@@ -158,6 +159,7 @@ class ToolExecutor:
                 file_ids=file_ids,
                 emit_session=emit_session,
                 persist_turn=persist_turn,
+                existing_turn_id=existing_turn_id,
             ):
                 yield event
             return

@@ -23,6 +23,7 @@ async def stream_chat_response(
     file_ids: List[str],
     emit_session: bool = True,
     persist_turn: bool = True,
+    existing_turn_id: Optional[str] = None,
 ) -> AsyncGenerator[ServerSentEvent, None]:
     """
     处理聊天/澄清分支的流式响应。
@@ -74,7 +75,8 @@ async def stream_chat_response(
                     response=reply_text,
                     db_session=db,
                     user_id=user_id,
-                    file_ids=file_ids
+                    file_ids=file_ids,
+                    existing_turn_id=UUID(existing_turn_id) if existing_turn_id else None,
                 )
                 logger.info(f"✅ 澄清轮次及文件关联已落库: thread={actual_thread_id}, files={file_ids}")
             except Exception as e:
@@ -90,6 +92,7 @@ async def stream_chat_response(
                 thread_id=UUID(actual_thread_id),
                 db_session=db,
                 file_ids=file_ids,
+                existing_turn_id=UUID(existing_turn_id) if existing_turn_id else None,
             ):
                 full_reply += chunk
                 yield sse(
@@ -101,6 +104,7 @@ async def stream_chat_response(
                 {"step": "chat", "status": "done", "output": full_reply},
                 event="message",
             )
+            logger.info(f"[DEBUG] conversation_response stream complete: full_reply length = {len(full_reply)}, existing_turn_id = {existing_turn_id}")
         except Exception as e:
             logger.error(f"聊天服务流式调用失败: {e}", exc_info=True)
             error_msg = "抱歉，目前系统出小差了，请稍后再试。"
@@ -124,7 +128,8 @@ async def stream_chat_response(
                     response=fallback_msg,
                     db_session=db,
                     user_id=user_id,
-                    file_ids=file_ids
+                    file_ids=file_ids,
+                    existing_turn_id=UUID(existing_turn_id) if existing_turn_id else None,
                 )
             except Exception as e:
                 logger.error(f"❌ 保存兜底澄清轮次失败: {e}", exc_info=True)

@@ -1,6 +1,7 @@
 """聊天服务 - 处理纯文本对话"""
 
 import logging
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Dict, List, Optional
 from uuid import UUID
 
@@ -72,7 +73,8 @@ class ChatService:
         user_id: UUID,
         thread_id: Optional[UUID] = None,
         db_session: Optional[AsyncSessionLocal] = None,
-        file_ids: List[str] = None
+        file_ids: List[str] = None,
+        existing_turn_id: Optional[UUID] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式聊天（已接入富上下文系统）
@@ -122,7 +124,8 @@ class ChatService:
                 response=full_response,
                 db_session=db_session,
                 user_id=user_id,
-                file_ids=file_ids
+                file_ids=file_ids,
+                existing_turn_id=existing_turn_id,
             )
             
             if turn:
@@ -173,12 +176,42 @@ class ChatService:
         response: str,
         db_session: AsyncSessionLocal,
         user_id: Optional[UUID] = None,
-        file_ids: Optional[List[str]] = None
+        file_ids: Optional[List[str]] = None,
+        existing_turn_id: Optional[UUID] = None,
     ) -> Optional[ThreadTurn]:
-        """保存对话轮次"""
+        """
+        保存对话轮次
+
+        Args:
+            existing_turn_id: 如果传入已有 turn_id，则更新该 turn 而不是创建新 turn。
+                              这确保了 excel_agent 创建的 turn 和这里保存的 turn 是同一个。
+        """
         if db_session is None: return None
         try:
             repo = TurnRepository(db_session)
+
+            if existing_turn_id:
+                # 复用已有的 turn（由 excel_agent 提前创建）
+                from sqlalchemy import select
+                from app.models.thread import ThreadTurn
+                stmt = select(ThreadTurn).where(ThreadTurn.id == existing_turn_id)
+                result = await db_session.execute(stmt)
+                turn = result.scalar_one_or_none()
+                if turn:
+                    turn.response_text = response
+                    turn.status = "completed"
+                    turn.completed_at = datetime.now(timezone.utc)
+                # 关联文件（已有则跳过）
+                if file_ids and user_id:
+                    try:
+                        file_uuids = [UUID(fid) if isinstance(fid, str) else fid for fid in file_ids]
+                        await repo.link_files_to_turn(existing_turn_id, file_uuids, user_id)
+                    except Exception as e:
+                        logger.warning(f"聊天轮次关联文件失败: {e}")
+                await db_session.commit()
+                return turn
+
+            # 创建新 turn（旧逻辑）
             turn_number = await repo.get_next_turn_number(thread_id)
             turn = await repo.create_turn(
                 thread_id=thread_id, turn_number=turn_number,

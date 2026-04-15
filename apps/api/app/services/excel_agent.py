@@ -127,7 +127,8 @@ class ExcelAgent:
                         db=db_session,
                         file_ids=file_ids,
                         emit_session=emit_session,
-                        persist_turn=False,
+                        persist_turn=True,
+                        existing_turn_id=current_turn_id,
                     ):
                         yield event
                         await self._record_event_on_turn(
@@ -137,8 +138,11 @@ class ExcelAgent:
                             turn_id=current_turn_id,
                             tool_name=decision["tool_name"],
                         )
+                    # Note: turn persistence is handled by stream_chat_response
+                    # via _save_conversation_turn (persist_turn=True, existing_turn_id=current_turn_id).
+                    # Do NOT overwrite response_text here - _save_conversation_turn already
+                    # stored the correct response from chat_service.chat_stream().
                     if turn_context["repo"] is not None and current_turn_id is not None and current_thread_id is not None:
-                        await turn_context["repo"].update_turn_response_text(current_turn_id, decision.get("response_text", ""))
                         await turn_context["repo"].update_turn_intent_type(current_turn_id, decision.get("intent", CHAT_INTENT))
                         await turn_context["repo"].finalize_turn(current_turn_id, UUID(current_thread_id), "completed")
                         await turn_context["repo"].commit()
@@ -391,7 +395,7 @@ class ExcelAgent:
         payload = json.loads(event.data)
         step = payload.get("step")
         status = payload.get("status")
-        if not step or step in {"complete", "chat"} or not status:
+        if not step or step == "complete" or not status:
             return
         stage_id = payload.get("stage_id")
         record = None
