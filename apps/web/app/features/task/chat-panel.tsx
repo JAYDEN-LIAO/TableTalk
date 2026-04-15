@@ -101,10 +101,6 @@ export interface ChatPanelProps {
   // ========== 文件上下文 ==========
   /** 当前可用的文件上下文（历史轮次的输出文件，可被后续轮次引用） */
   availableFiles?: OutputFileInfo[]
-  /** 选中作为输入的历史文件 ID */
-  selectedHistoryFiles?: string[]
-  /** 切换历史文件选中状态 */
-  onToggleHistoryFile?: (fileId: string) => void
 
   // ========== UI 配置 ==========
   /** 用户头像 */
@@ -154,8 +150,6 @@ const ChatPanel = ({
   onRetry,
   onCancel,
   availableFiles = [],
-  selectedHistoryFiles = [],
-  onToggleHistoryFile,
   userAvatar,
   ref,
 }: ChatPanelProps) => {

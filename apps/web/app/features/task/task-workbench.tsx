@@ -29,7 +29,7 @@ import {
 import type { PreviewTab } from './preview-panel'
 import type { ChatMessage } from '~/hooks/use-chat'
 import type { ConversationTurn } from './chat-panel'
-import type { AssistantMessage, UserMessage, StepRecord, StepName, StepError, OutputFileInfo, ExportStepOutput } from '~/components/llm-chat/message-list/types'
+import type { AssistantMessage, UserMessage, UserMessageAttachment, StepRecord, StepName, StepError, OutputFileInfo, ExportStepOutput } from '~/components/llm-chat/message-list/types'
 
 export interface TaskWorkbenchProps {
   threadId?: string
@@ -59,6 +59,8 @@ const TaskWorkbench = ({ threadId }: TaskWorkbenchProps) => {
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null)
   // 新会话确认弹窗
   const [showNewSessionDialog, setShowNewSessionDialog] = useState(false)
+  // 最近一轮的产出文件（立即更新，不等 turns 重组）
+  const [lastTurnOutputFiles, setLastTurnOutputFiles] = useState<OutputFileInfo[]>([])
 
   // 文件上传
   const fileUpload = useFileUpload()
@@ -79,6 +81,7 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
   },
   onExportSuccess: (files) => {
     setOutputFiles(files)
+    setLastTurnOutputFiles(files)
     setTaskState('done')
     setActiveTurnId(null)
     setPreviewTab('output')
@@ -216,9 +219,11 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
       const latestOutputFiles = getLatestOutputFilesFromTurns(thread.turns)
       if (latestOutputFiles.length > 0) {
         setOutputFiles(latestOutputFiles)
+        setLastTurnOutputFiles(latestOutputFiles)
         setTaskState('done')
       } else {
         setOutputFiles([])
+        setLastTurnOutputFiles([])
       }
 
       setMessages(loadedMessages)
@@ -239,6 +244,7 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
         clearMessages()
         fileUpload.clearFiles()
         setOutputFiles([])
+        setLastTurnOutputFiles([])
         setTaskState('idle')
         setPreviewTab('input')
         loadThread(threadId)
@@ -278,11 +284,21 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
 
   // 实际执行发送消息的逻辑
   const doSendMessage = (targetThreadId?: string) => {
-    const files = fileUpload.uploadedFiles.map(item => ({
+    // 本轮上传的文件
+    let files: UserMessageAttachment[] = fileUpload.uploadedFiles.map(item => ({
       id: item.id,
       filename: item.filename,
-      path: item.path
+      path: item.path,
     }))
+
+    // 无新上传时，自动以最近一轮的产出文件作为本次处理的文件
+    if (files.length === 0 && lastTurnOutputFiles.length > 0) {
+      files = lastTurnOutputFiles.map(f => ({
+        id: f.file_id,
+        filename: f.filename,
+        path: f.url,
+      }))
+    }
 
     // 生成新轮次 ID 并设为活跃
     const newTurnId = `turn-${Date.now()}`
