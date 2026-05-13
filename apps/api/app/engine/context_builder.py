@@ -2,11 +2,15 @@
 
 负责将上下文数据格式化为适合LLM处理的文本格式。
 根据意图类型使用不同的模板和格式化策略。
+
+v2: 引入 tiktoken 精确计数、三级压缩策略、Schema 按需注入。
 """
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from uuid import UUID
+
+from app.engine.token_counter import get_token_counter
 
 logger = logging.getLogger(__name__)
 
@@ -425,45 +429,295 @@ class ContextBuilder:
         
         return formatted
     
+    # ------------------------------------------------------------------
+    # Token 管理（v2: tiktoken 精确计数）
+    # ------------------------------------------------------------------
+
     def _truncate_to_token_limit(self, text: str) -> str:
-        """
-        将文本截断到令牌限制
-        
-        注意：这是一个简化的实现，实际应该使用tokenizer。
-        这里使用字符数作为近似值（假设1个token ≈ 4个字符）。
-        """
-        max_chars = self.max_tokens * 4
-        
-        if len(text) <= max_chars:
+        """将文本截断到 token 限制（使用 tiktoken 精确计数）。"""
+        counter = get_token_counter()
+        current_tokens = counter.count(text)
+
+        if current_tokens <= self.max_tokens:
             return text
-        
-        # 截断文本并添加提示
-        truncated = text[:max_chars]
-        
-        # 尝试在句子边界处截断
-        last_period = truncated.rfind('.')
-        last_newline = truncated.rfind('\n')
-        
-        # 选择最合适的截断点
-        cutoff = max(last_period, last_newline)
-        if cutoff > max_chars * 0.8:  # 如果截断点不太靠前
-            truncated = truncated[:cutoff + 1]
-        
-        truncated += f"\n\n[上下文已截断，原始长度: {len(text)} 字符，限制: {max_chars} 字符]"
-        
+
+        # 按比例估算需裁剪的字符数，避免逐字符重编码
+        ratio = self.max_tokens / max(current_tokens, 1)
+        target_chars = max(1, int(len(text) * ratio * 0.9))
+
+        truncated = text[:target_chars]
+        # 尝试在语义边界处截断
+        for boundary in ["\n\n", "\n", ". ", "。", "；"]:
+            last_boundary = truncated.rfind(boundary)
+            if last_boundary > target_chars * 0.7:
+                truncated = truncated[: last_boundary + len(boundary)]
+                break
+
+        truncated += (
+            f"\n\n[上下文已截断: {current_tokens} → {counter.count(truncated)} tokens"
+            f", 限制 {self.max_tokens}]"
+        )
         return truncated
-    
+
     def estimate_token_count(self, text: str) -> int:
+        """使用 tiktoken 精确计算文本的 token 数量。"""
+        return get_token_counter().count(text)
+
+    def count_messages_tokens(self, messages: List[Dict[str, str]]) -> int:
+        """计算消息列表的精确 token 数。"""
+        return get_token_counter().count_messages(messages)
+
+    # ------------------------------------------------------------------
+    # 上下文压缩（v2: 三级压缩策略）
+    # ------------------------------------------------------------------
+
+    def compact_history_messages(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        budget_tokens: int,
+        query: str = "",
+    ) -> List[Dict[str, str]]:
+        """在 token 预算内压缩历史消息。
+
+        三级策略:
+            L1 — 最近 2 对 user/assistant 完整保留
+            L2 — 更早的消息合并为一条摘要消息
+            L3 — 超出预算时裁剪 L2 摘要
+
+        Args:
+            messages: 完整的历史消息列表
+            budget_tokens: 分配给历史的 token 预算
+            query: 当前查询（用于保留语义相关性）
+
+        Returns:
+            压缩后的消息列表（可能包含摘要消息）
         """
-        估算文本的token数量
-        
-        简化实现：假设1个token ≈ 4个字符
-        实际项目中应该使用真正的tokenizer
+        counter = get_token_counter()
+        total = counter.count_messages(messages)
+
+        if total <= budget_tokens:
+            return messages
+
+        # 分离最近 2 轮和更早的消息
+        recent_pairs = 2
+        recent_count = min(recent_pairs * 2, len(messages))
+        recent = messages[-recent_count:] if recent_count > 0 else []
+        older = messages[:-recent_count] if len(messages) > recent_count else []
+
+        recent_tokens = counter.count_messages(recent)
+        remaining_budget = budget_tokens - recent_tokens
+
+        if not older or remaining_budget <= 0:
+            # 连最近消息都超出预算，做硬截断
+            return self._hard_truncate_messages(recent, budget_tokens)
+
+        # 对更早的消息生成结构化摘要
+        summary = self._summarize_older_messages(older)
+        summary_msg = {
+            "role": "system",
+            "content": f"[历史对话摘要] {summary}",
+        }
+        summary_tokens = counter.count(summary_msg["content"]) + 4
+
+        if summary_tokens > remaining_budget:
+            # 摘要本身超出预算，裁剪摘要
+            ratio = remaining_budget / max(summary_tokens, 1)
+            truncate_chars = int(len(summary_msg["content"]) * ratio * 0.9)
+            summary_msg["content"] = (
+                summary_msg["content"][:truncate_chars] + "...[摘要已裁剪]"
+            )
+
+        return [summary_msg] + recent
+
+    def _hard_truncate_messages(
+        self,
+        messages: List[Dict[str, str]],
+        budget_tokens: int,
+    ) -> List[Dict[str, str]]:
+        """硬截断消息列表到 token 预算内（从最早的消息开始丢弃）。"""
+        counter = get_token_counter()
+        result: List[Dict[str, str]] = []
+        used = 0
+
+        for msg in reversed(messages):
+            msg_tokens = counter.count(msg.get("content", "")) + 4
+            if used + msg_tokens > budget_tokens:
+                break
+            result.insert(0, msg)
+            used += msg_tokens
+
+        return result
+
+    @staticmethod
+    def _summarize_older_messages(messages: List[Dict[str, str]]) -> str:
+        """对更早的消息生成结构化摘要（轻量级，基于模式提取）。
+
+        注意：完整的 LLM 摘要需要异步调用，这里提供轻量级的模式提取。
+        对于真正的 LLM 摘要，由调用方在外部异步处理。
         """
-        # 去除空白字符
-        cleaned_text = ' '.join(text.split())
-        # 简单估算
-        return max(1, len(cleaned_text) // 4)
+        if not messages:
+            return "无历史对话。"
+
+        parts: List[str] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                # 截断用户消息用于摘要
+                short = content[:120] + "..." if len(content) > 120 else content
+                parts.append(f"用户: {short}")
+            elif role == "assistant":
+                short = content[:200] + "..." if len(content) > 200 else content
+                parts.append(f"助手: {short}")
+            elif role == "tool":
+                # 工具调用结果只保留关键信息
+                parts.append("[工具执行结果]")
+
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Schema 按需注入（v2）
+    # ------------------------------------------------------------------
+
+    def filter_schema_for_query(
+        self,
+        schema_lines: List[str],
+        query: str,
+    ) -> List[str]:
+        """根据用户查询过滤 schema，仅保留相关列。
+
+        策略：将 query 分词，检查每个 schema 行中的列名是否包含
+        query 中的关键词。匹配到的整行保留，未匹配的仅保留文件名和列数统计。
+
+        Args:
+            schema_lines: 原始 schema 行列表
+            query: 用户查询文本
+
+        Returns:
+            过滤后的 schema 行列表
+        """
+        if not query or not schema_lines:
+            return schema_lines
+
+        # 从 query 提取关键词（过滤停用词和短词）
+        keywords = self._extract_keywords(query)
+        if not keywords:
+            return schema_lines
+
+        filtered: List[str] = []
+        for line in schema_lines:
+            # 检查该行是否包含 query 关键词
+            line_lower = line.lower()
+            relevant = any(kw.lower() in line_lower for kw in keywords)
+            if relevant:
+                filtered.append(line)
+            else:
+                # 只保留文件/表名 + 列数统计
+                compact = self._compact_schema_line(line)
+                if compact and compact not in filtered:
+                    filtered.append(compact)
+
+        if not filtered:
+            return schema_lines  # 回退：全量保留
+
+        return filtered
+
+    @staticmethod
+    def _extract_keywords(query: str) -> List[str]:
+        """从查询中提取有意义的关键词。"""
+        # 常见停用词
+        stop_words = {
+            "的", "了", "在", "是", "我", "你", "他", "她", "它",
+            "这", "那", "和", "与", "或", "对", "不", "要", "请",
+            "把", "被", "让", "从", "到", "用", "为", "给", "帮",
+            "个", "些", "一个", "这个", "那个", "什么", "怎么",
+            "the", "a", "an", "is", "are", "in", "of", "to", "for",
+        }
+
+        # 简单分词（基于空格、标点符号）
+        import re
+        tokens = re.split(r"[\s,，。！？、；：""''（）\(\)\[\]{}]+", query.lower())
+        keywords = [
+            t for t in tokens
+            if len(t) >= 2 and t not in stop_words
+        ]
+        return keywords[:10]  # 最多 10 个关键词
+
+    @staticmethod
+    def _compact_schema_line(line: str) -> str:
+        """压缩单行 schema：去掉详细列名，只保留文件名/表名和列数。"""
+        # 格式: "- 文件 [xxx] 表 [Sheet1] 列: col1, col2, col3, ..."
+        # 压缩为: "- 文件 [xxx] 表 [Sheet1] (N 列)"
+        import re
+
+        match = re.match(
+            r"(- 文件 \[(.+?)\] 表 \[(.+?)\] 列: )(.+)", line
+        )
+        if match:
+            prefix = f"- 文件 [{match.group(2)}] 表 [{match.group(3)}]"
+            columns = [c.strip() for c in match.group(4).split(",")]
+            return f"{prefix} ({len(columns)} 列)"
+        return line
+
+    # ------------------------------------------------------------------
+    # 上下文预算感知（v2）
+    # ------------------------------------------------------------------
+
+    def compact_context_if_needed(
+        self,
+        messages: List[Dict[str, str]],
+        schema_lines: List[str],
+        *,
+        max_input_tokens: int = 8000,
+        query: str = "",
+    ) -> tuple[List[Dict[str, str]], List[str], Dict[str, int]]:
+        """在 Agent 循环每次迭代前检查 token 预算，不足时自动压缩。
+
+        Returns:
+            (压缩后的 messages, 压缩后的 schema_lines, 预算报告)
+        """
+        counter = get_token_counter()
+        schema_text = "\n".join(schema_lines) if schema_lines else ""
+        schema_tokens = counter.count(schema_text)
+
+        msgs_tokens = counter.count_messages(messages)
+        total = msgs_tokens + schema_tokens
+
+        budget_report = {
+            "messages_tokens": msgs_tokens,
+            "schema_tokens": schema_tokens,
+            "total_tokens": total,
+            "budget": max_input_tokens,
+            "compacted": False,
+        }
+
+        if total <= max_input_tokens:
+            return messages, schema_lines, budget_report
+
+        # 超出预算：先压缩 schema，再压缩消息
+        budget_report["compacted"] = True
+
+        # Step 1: Schema 按需过滤
+        compacted_schema = self.filter_schema_for_query(schema_lines, query)
+
+        # Step 2: 为历史消息分配预算（优先保证 schema + 当前 query）
+        schema_text_new = "\n".join(compacted_schema)
+        new_schema_tokens = counter.count(schema_text_new)
+        history_budget = max(
+            1000, max_input_tokens - new_schema_tokens - 2000
+        )
+
+        compacted_msgs = self.compact_history_messages(
+            messages, budget_tokens=history_budget, query=query
+        )
+
+        budget_report["messages_tokens_after"] = counter.count_messages(
+            compacted_msgs
+        )
+        budget_report["schema_tokens_after"] = new_schema_tokens
+
+        return compacted_msgs, compacted_schema, budget_report
 
 
 # 工厂函数

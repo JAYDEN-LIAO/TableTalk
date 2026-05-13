@@ -1,8 +1,15 @@
-"""生成+验证复合阶段"""
+"""生成+验证复合阶段
+
+v2: LLM 生成自校正
+  - 错误分类器（COLUMN_NOT_FOUND / SYNTAX_ERROR / LOGIC_ERROR）
+  - 针对性修复提示
+  - 渐进式修复策略
+"""
 import re
 import json
 import logging
-from typing import Any, Dict, Generator, List, TYPE_CHECKING
+from enum import Enum
+from typing import Any, Dict, Generator, List, Optional, Tuple, TYPE_CHECKING
 
 from tablo.types import ProcessStage, EventType, ProcessEvent, ProcessConfig
 from tablo.stages.base import Stage
@@ -13,6 +20,153 @@ if TYPE_CHECKING:
     from typing import Any as LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+# --- v2: 错误分类 ---
+
+class ErrorCategory(Enum):
+    """验证错误的分类。"""
+    COLUMN_NOT_FOUND = "column_not_found"    # 列名/文件名不存在
+    SYNTAX_ERROR = "syntax_error"            # JSON 格式/结构错误
+    LOGIC_ERROR = "logic_error"              # 函数参数不匹配、引用链断裂等
+    UNKNOWN = "unknown"
+
+
+def classify_validation_errors(
+    errors: List[str],
+    available_columns: Optional[List[str]] = None,
+) -> Dict[ErrorCategory, List[str]]:
+    """将验证错误按类型分组，用于生成针对性修复提示。
+
+    Args:
+        errors: 验证错误消息列表
+        available_columns: 可用的列名列表（用于判断列名错误）
+
+    Returns:
+        {ErrorCategory: [error_messages]}
+    """
+    classified: Dict[ErrorCategory, List[str]] = {
+        ErrorCategory.COLUMN_NOT_FOUND: [],
+        ErrorCategory.SYNTAX_ERROR: [],
+        ErrorCategory.LOGIC_ERROR: [],
+        ErrorCategory.UNKNOWN: [],
+    }
+
+    col_patterns = [
+        "列名", "column", "列 ", "表中不存在", "找不到", "not found",
+        "不存在", "没有这个", "未定义", "unknown column",
+    ]
+    syntax_patterns = [
+        "JSON", "json", "格式错误", "解析", "parse", "syntax",
+        "缺少", "缺少必填", "required", "类型错误", "expected",
+        "不是有效的", "invalid",
+    ]
+    logic_patterns = [
+        "参数", "argument", "必须", "不能", "冲突", "引用",
+        "不匹配", "circular", "循环", "交叉", "表名",
+    ]
+
+    for err in errors:
+        err_lower = err.lower()
+
+        # 检查是否命中列名模式
+        if any(p.lower() in err_lower for p in col_patterns):
+            # 进一步检查：错误中是否提到了具体的列名
+            if available_columns:
+                mentioned_col = any(
+                    col.lower() in err_lower for col in available_columns
+                )
+                if mentioned_col:
+                    classified[ErrorCategory.COLUMN_NOT_FOUND].append(err)
+                    continue
+            else:
+                classified[ErrorCategory.COLUMN_NOT_FOUND].append(err)
+                continue
+
+        # 检查语法错误
+        if any(p.lower() in err_lower for p in syntax_patterns):
+            classified[ErrorCategory.SYNTAX_ERROR].append(err)
+            continue
+
+        # 检查逻辑错误
+        if any(p.lower() in err_lower for p in logic_patterns):
+            classified[ErrorCategory.LOGIC_ERROR].append(err)
+            continue
+
+        classified[ErrorCategory.UNKNOWN].append(err)
+
+    return classified
+
+
+def build_targeted_retry_hint(
+    classified: Dict[ErrorCategory, List[str]],
+    available_columns: Optional[List[str]] = None,
+    retry_count: int = 1,
+) -> str:
+    """根据错误分类生成针对性修复提示。
+
+    Args:
+        classified: 分类后的错误
+        available_columns: 可用列名列表
+        retry_count: 当前重试次数（影响提示详细程度）
+
+    Returns:
+        针对性的修复提示文本
+    """
+    hints: List[str] = []
+
+    if classified[ErrorCategory.COLUMN_NOT_FOUND]:
+        errors = classified[ErrorCategory.COLUMN_NOT_FOUND]
+        hint = "## 列名/表名错误\n\n"
+        hint += f"发现 {len(errors)} 个列名或表名相关的错误。\n"
+        if available_columns:
+            hint += f"**可用的列名包括**: {', '.join(available_columns[:30])}"
+            if len(available_columns) > 30:
+                hint += f" (等 {len(available_columns)} 列)"
+            hint += "\n"
+        hint += "**修复方向**: 请逐一核对操作中的 file_id、table（sheet名）、column 字段，"
+        hint += "确保它们与上方 schema 中的名称完全一致（区分大小写）。\n"
+        if retry_count >= 2:
+            hint += "如果某个列名确实不存在，考虑用相近的列名替代，或去掉该操作。\n"
+        hints.append(hint)
+
+    if classified[ErrorCategory.SYNTAX_ERROR]:
+        errors = classified[ErrorCategory.SYNTAX_ERROR]
+        hint = "## JSON 格式/结构错误\n\n"
+        hint += f"发现 {len(errors)} 个格式或结构相关的错误。\n"
+        hint += "**修复方向**:\n"
+        hint += "1. 确保 JSON 语法正确（引号配对、逗号不遗漏、括号匹配）\n"
+        hint += "2. 每个操作必须包含 type, description, file_id, table 字段\n"
+        hint += "3. 不同操作类型的 required 字段不同，请对照操作规范检查\n"
+        if retry_count >= 2:
+            hint += "4. 如果某个操作类型不确定字段，简化操作为更基础的类型\n"
+        hints.append(hint)
+
+    if classified[ErrorCategory.LOGIC_ERROR]:
+        errors = classified[ErrorCategory.LOGIC_ERROR]
+        hint = "## 逻辑/参数错误\n\n"
+        hint += f"发现 {len(errors)} 个逻辑或参数相关的错误。\n"
+        hint += "**修复方向**:\n"
+        hint += "1. 检查函数参数数量和类型是否匹配（如 VLOOKUP 需要 4 个参数）\n"
+        hint += "2. 确认跨表引用格式为 file_id.sheet_name.column_name（三段式）\n"
+        hint += "3. 检查变量引用的定义顺序（先 aggregate/create_variable 再引用）\n"
+        if retry_count >= 2:
+            hint += "4. 考虑将复杂操作拆分为多个简单操作\n"
+        hints.append(hint)
+
+    if classified[ErrorCategory.UNKNOWN]:
+        errors = classified[ErrorCategory.UNKNOWN]
+        hint = "## 其他错误\n\n"
+        hint += f"发现 {len(errors)} 个未分类的错误。\n"
+        for err in errors[:3]:
+            hint += f"- {err}\n"
+        hint += "**修复方向**: 请根据具体错误信息修正，重点关注字段名和数据格式。\n"
+        hints.append(hint)
+
+    # 组装最终提示
+    severity = "初次" if retry_count == 1 else ("再次" if retry_count == 2 else "最后一次")
+    prefix = f"## {severity}重试修复指引\n\n"
+    return prefix + "\n---\n".join(hints)
 
 
 class GenerateValidateStage(Stage):
@@ -68,8 +222,12 @@ class GenerateValidateStage(Stage):
         max_retries = config.max_validation_retries
 
         # 用于重试时传递错误信息
-        previous_errors: List[str] = None
-        previous_json: str = None
+        previous_errors: Optional[List[str]] = None
+        previous_json: Optional[str] = None
+        targeted_hint: Optional[str] = None  # v2: 针对性修复提示
+
+        # 收集可用列名供错误分类使用
+        available_columns = self._collect_all_columns(tables)
 
         # 最终输出
         operations_dict = {}
@@ -85,6 +243,7 @@ class GenerateValidateStage(Stage):
                     previous_errors=previous_errors,
                     previous_json=previous_json,
                     processing_context=processing_context,
+                    targeted_hint=targeted_hint,
                 )
             except StageError:
                 raise
@@ -127,10 +286,16 @@ class GenerateValidateStage(Stage):
                 )
                 break
 
-            # 准备重试
+            # --- v2: 错误分类 + 针对性提示 ---
+            classified = classify_validation_errors(validation_errors, available_columns)
+            targeted_hint = build_targeted_retry_hint(
+                classified, available_columns, retry_count=retry_count
+            )
             logger.info(
                 f"验证失败，准备重试 ({retry_count}/{max_retries})，"
-                f"错误: {validation_errors}"
+                f"错误分类: col={len(classified[ErrorCategory.COLUMN_NOT_FOUND])} "
+                f"syntax={len(classified[ErrorCategory.SYNTAX_ERROR])} "
+                f"logic={len(classified[ErrorCategory.LOGIC_ERROR])}"
             )
             previous_errors = validation_errors
             previous_json = operations_json
@@ -150,12 +315,16 @@ class GenerateValidateStage(Stage):
         analysis: str,
         schemas: dict,
         config: ProcessConfig,
-        previous_errors: List[str] = None,
-        previous_json: str = None,
+        previous_errors: Optional[List[str]] = None,
+        previous_json: Optional[str] = None,
         processing_context: str = "",
+        targeted_hint: Optional[str] = None,
     ) -> Generator[ProcessEvent, None, tuple]:
         """
         运行生成子阶段
+
+        Args:
+            targeted_hint: v2 针对性修复提示（错误分类后的具体指引）
 
         Returns:
             (operations_json, operations_dict)
@@ -174,23 +343,24 @@ class GenerateValidateStage(Stage):
             if config.stream_llm:
                 operations_json = ""
                 accumulated_text = ""
-                
+
                 for delta, full_content in self.llm_client.generate_operations_stream(
                     enhanced_query, analysis, schemas,
                     previous_errors=previous_errors,
                     previous_json=previous_json,
+                    targeted_hint=targeted_hint,
                 ):
                     if delta:
                         accumulated_text += delta
 
                     if full_content and full_content.strip():
                         operations_json = full_content
-                        
+
                     yield self._event_stream(delta, stage_id)
 
                 if not operations_json.strip():
                     operations_json = accumulated_text
-                    
+
                 # 清理 JSON 响应
                 operations_json = self._clean_json_response(operations_json)
             else:
@@ -199,6 +369,7 @@ class GenerateValidateStage(Stage):
                     enhanced_query, analysis, schemas,
                     previous_errors=previous_errors,
                     previous_json=previous_json,
+                    targeted_hint=targeted_hint,
                 )
 
             # 解析 JSON
@@ -284,6 +455,20 @@ class GenerateValidateStage(Stage):
             delta=delta,
             error=error,
         )
+
+    @staticmethod
+    def _collect_all_columns(tables: "FileCollection") -> Optional[List[str]]:
+        """收集所有可用的列名（用于错误分类时判断列名错误）。"""
+        try:
+            columns: List[str] = []
+            for file_id in tables.get_file_ids():
+                excel_file = tables.get_file(file_id)
+                for sheet_name in excel_file.get_sheet_names():
+                    table = excel_file.get_sheet(sheet_name)
+                    columns.extend(table.get_columns())
+            return list(set(columns))
+        except Exception:
+            return None
 
     def _build_file_sheets(self, tables: "FileCollection") -> Dict[str, List[str]]:
         """构建 file_id -> sheet_names 映射"""

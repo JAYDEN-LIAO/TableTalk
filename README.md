@@ -8,10 +8,11 @@ LLM-powered Excel data processing. Describe what you need in natural language �
 
 1. Upload Excel file(s)
 2. Describe your data processing requirement in natural language
-3. LLM generates structured JSON operations (not raw formulas)
-4. Engine executes operations and produces Excel files with real formulas
+3. **Agent** (ExcelAgent) routes via tool calling — conversation / clarification / processing / analysis
+4. LLM generates structured JSON operations (not raw formulas), with error-classified auto-retry
+5. Engine executes operations and produces Excel files with real formulas
 
-All formulas are 100% reproducible — no LLM-generated code is executed directly.
+Agent enforces guardrails: max iterations, token budget, stagnation self-correction. All formulas are 100% reproducible — no LLM-generated code is executed directly.
 
 ## Tech Stack
 
@@ -111,9 +112,9 @@ selgetabel/
 │   │   ├── app/
 │   │   │   ├── main.py        # App entry point
 │   │   │   ├── api/routes/    # Route handlers
-│   │   │   ├── engine/        # Core: parser, executor, formula gen, intent classifier
+│   │   │   ├── engine/        # Core: parser, executor, formula gen, token counter, context builder
 │   │   │   ├── processor/     # Processing pipeline stages
-│   │   │   ├── services/      # Business logic: chat, intent, context, file I/O, auth
+│   │   │   ├── services/      # Business logic: agent, chat, context, file I/O, auth
 │   │   │   ├── persistence/   # Data access layer
 │   │   │   ├── models/        # SQLAlchemy ORM
 │   │   │   └── core/          # Config, DB, JWT
@@ -125,6 +126,8 @@ selgetabel/
 │       │   ├── features/      # Feature modules
 │       │   └── lib/           # Utilities & API client
 │       └── vite.config.ts
+├── packages/
+│   └── tablo/         # Reusable Excel processing core (pure Python)
 ├── docker/            # Docker Compose deployment
 ├── docs/              # Technical documentation
 │   ├── design/        # System design & architecture
@@ -137,15 +140,16 @@ selgetabel/
 ```
 
 **Key engine components:**
-- `intent_classifier.py` — LLM-based intent classification (CHAT/ANALYSIS/PROCESSING/UNCLEAR)
-- `context_builder.py` — Formats context for LLM prompts based on intent type
+- `context_builder.py` — Formats context for LLM prompts (v2: tiktoken counting, 3-level compression, schema-on-demand)
 - `excel_generator.py` — Converts JSON expressions to Excel formulas
 - `llm_client.py` — Unified LLM API interface with multi-provider support
+- `token_counter.py` — Precise token counting via tiktoken (replaces char/4 estimation)
 
 **Key services:**
-- `intent_service.py` — Orchestrates intent recognition and routing decisions
+- `excel_agent.py` — **Agent orchestrator**: tool-calling loop (4 tools), guardrails (max iterations, token budget, stagnation self-correction), structured observation
 - `context_service.py` — Manages multi-turn conversation context
-- `chat_stream.py` — Streams chat responses for non-processing intents
+- `chat_stream.py` — Streams chat responses for conversation/clarification tools
+- `processor_stream.py` — Unified Excel processing pipeline (load→generate→validate→execute→export)
 
 ### LLM Providers
 
@@ -167,23 +171,20 @@ The system supports multiple LLM providers with database-driven configuration. P
 
 See [LLM Provider Design](docs/design/LLM_PROVIDER_DESIGN.md) for the full architecture.
 
-### Intent Classification
+### Agent Architecture
 
-The system uses LLM-based intent classification to understand user queries and route them appropriately:
+The system uses a **tool-calling agent** (ExcelAgent) instead of traditional intent classification:
 
-| Intent | Description |
-|--------|-------------|
-| `chat` | Pure conversation without file processing (greetings, questions about features, etc.) |
-| `analysis` | Data analysis/summary without modifying data |
-| `processing` | Data processing that modifies/transforms/exports data |
-| `unclear` | Ambiguous requirements or missing parameters, requires clarification |
+| Tool | Description |
+|------|-------------|
+| `conversation_response` | Direct answer for general questions, no file processing |
+| `clarification_response` | Ask follow-up questions when requirements are ambiguous |
+| `processing_workflow` | Execute full processing pipeline (modify/transform/export data) |
+| `analysis_workflow` | Execute analysis pipeline (summarize/analyze data without modification) |
 
-**Classification rules:**
-- If no files are uploaded, intent cannot be `analysis` or `processing` — must be `chat`
-- If user provides vague instructions (e.g., "group by" without specifying which column), system returns `unclear` with a clarification question
-- If user provides a short response like "yes", "correct", or a column name, system inherits the intent from the previous conversation turn
+**Guardrails:** The agent loop enforces max 5 iterations, token budget tracking (tiktoken-based), and stagnation self-correction (detects repeated tool calls with ≥70% arg similarity → auto-clarifies).
 
-**Clarification flow:** When intent is `unclear` or requires clarification, the system asks a gentle follow-up question before proceeding.
+**Multi-step reasoning:** Workflow tool results are formatted as structured JSON observation and fed back to the agent, enabling follow-up decisions.
 
 ### Multi-turn Conversation
 
@@ -191,10 +192,10 @@ The system maintains conversation context through a **Thread/Turn** model:
 
 - **Thread**: A conversation session containing multiple turns
 - **Turn**: A single exchange (user query → system response)
-- **Context snapshots**: Each turn can save its context state for future reference
+- **Context snapshots**: Each turn saves its context state for future reference (v2: includes guardrail events)
 - **File inheritance**: When user doesn't upload files in a new turn, the system automatically inherits files from previous turns
 
-**Context types** are built based on intent:
+**Context types** built based on intent (v2: 3-level compression, schema-on-demand via query keyword matching):
 - `chat`: Conversation history, topic continuity analysis
 - `analysis`: Historical analysis records, data insights, file analysis history
 - `processing`: Operation history, data state, available files, file dependencies
@@ -204,12 +205,12 @@ The system maintains conversation context through a **Thread/Turn** model:
 The backend streams SSE events through a multi-stage pipeline:
 
 ```
-Intent Recognition → Generate + Validate (LLM, with retry) → Execute → Export
+Agent Tool Call → Generate + Validate (LLM, with classified retry) → Execute → Export
 ```
 
-- **Intent Recognition**: LLM classifies user intent (chat/analysis/processing/unclear)
-- **Generate**: LLM produces structured JSON operations from natural language
-- **Validate**: Parser checks format and applies function whitelist (with automatic retry on failure)
+- **Agent Tool Call**: Agent selects processing_workflow or analysis_workflow tool (with guardrails)
+- **Generate**: LLM produces structured JSON operations from natural language (v2: targeted retry hints via error classification: column/syntax/logic)
+- **Validate**: Parser checks format and applies function whitelist (v2: classified errors → targeted fix guidance)
 - **Execute**: Engine runs operations and generates Excel formulas
 - **Export**: Outputs downloadable `.xlsx` with embedded formulas
 

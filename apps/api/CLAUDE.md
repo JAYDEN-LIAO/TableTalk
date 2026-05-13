@@ -26,7 +26,7 @@ app/
 │   ├── main.py             # Router aggregation
 │   └── routes/             # auth, btrack, chat, file, llm, role, thread, user, fixture
 ├── core/                   # config, database, jwt, crypto, permissions, branding, SSE
-├── engine/                 # parser, executor, formula generation, intent, context, LLM providers
+├── engine/                 # parser, executor, formula generation, intent, context, LLM providers, token_counter
 ├── processor/              # staged processing pipeline
 │   └── stages/             # base, generate_validate, execute, errors
 ├── services/               # chat, processing, context, intent, auth, file, thread, storage
@@ -45,16 +45,24 @@ app/
 - Auth, RBAC, user, file, thread, btrack, and LLM configuration are split into separate route modules.
 - Fixture routes are only included in development mode.
 
+### Agent
+
+- `excel_agent.py` implements a **tool-calling agent loop** with 4 tools (conversation/clarification/processing/analysis).
+- **v2 Guardrails**: max_iterations hard limit (5), token budget tracking, stagnation self-correction (Jaccard similarity ≥70% → auto-clarify).
+- **v2 Structured Observation**: tool results formatted as JSON with status/summary/file_changes/errors, token-budget-aware trimming.
+- Guardrail events persisted to `context_snapshot.guardrails` for post-hoc analysis.
+
 ### Processing Pipeline
 
 The current backend is split between conversational handling and operation execution:
 
 1. Accept request and resolve user/file/thread context.
-2. Classify intent and build prompt/context payload.
-3. Generate model output through provider adapters.
-4. Validate structured operations in `engine/parser.py`.
-5. Execute operations and generate Excel output through `engine/executor.py` and `engine/excel_generator.py`.
-6. Stream progress and results back to the client.
+2. Agent selects tool via tool calling (with guardrails).
+3. Build prompt/context payload (v2: tiktoken precise counting, 3-level compression, schema-on-demand).
+4. Generate model output through provider adapters.
+5. Validate structured operations in `engine/parser.py` (v2: error-classified targeted retry hints).
+6. Execute operations and generate Excel output through `engine/executor.py` and `engine/excel_generator.py`.
+7. Stream progress and results back to the client.
 
 ### LLM Integration
 

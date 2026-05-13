@@ -14,6 +14,7 @@ class FakeLLMClient:
         schemas,
         previous_errors=None,
         previous_json=None,
+        targeted_hint=None,
     ):
         self.stream_calls.append(
             {
@@ -36,6 +37,7 @@ class FakeLLMClient:
         schemas,
         previous_errors=None,
         previous_json=None,
+        targeted_hint=None,
     ):
         self.generate_calls.append(
             {

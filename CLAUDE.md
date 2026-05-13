@@ -83,19 +83,21 @@ pnpm api:schema
 
 **Important backend layers:**
 - `app/core/` — config, database, JWT, permissions, encryption, branding, SSE helpers.
-- `app/engine/` — LLM integration, intent classification, context building, parser, executor, Excel formula generation, provider adapters.
+- `app/engine/` — LLM integration, intent classification, context building (v2: tiktoken token counting, 3-level compression, schema-on-demand), parser, executor, Excel formula generation, provider adapters, token_counter.
 - `app/processor/` — staged processing pipeline and stage contracts.
-- `app/services/` — chat, processing stream, context, intent, auth, file, thread, and LLM config services.
+- `app/services/` — ExcelAgent (v2: agent guardrails, stagnation self-correction, structured tool observation), chat, processing stream, context, intent, auth, file, thread, and LLM config services.
 - `app/models/` and `app/schemas/` — ORM and API schema definitions.
 - `app/persistence/` and `app/events/` — repository and event-bus support code.
 
 **Typical processing flow:**
 1. Upload Excel file(s).
 2. Submit a request through the chat flow.
-3. Backend classifies intent and builds prompt/context.
-4. LLM generates structured operations or chat output.
-5. Parser and pipeline validate the response, retrying when needed.
-6. Executor runs operations and emits exportable results through SSE.
+3. Agent (ExcelAgent) uses tool calling to select conversation/clarification/processing/analysis tool.
+4. Agent loop enforces guardrails: max 5 iterations, token budget tracking, stagnation self-correction.
+5. LLM generates structured operations (v2: error-classified targeted retry on validation failure).
+6. Parser and pipeline validate the response, retrying with targeted hints when needed.
+7. Executor runs operations and emits exportable results through SSE.
+8. Structured tool observation (JSON) fed back to agent for multi-step reasoning.
 
 ## Frontend Architecture
 

@@ -132,6 +132,7 @@ async def _export_modified_files(
     tables: FileCollection,
     modified_file_ids: List[str],
     path_prefix: str,
+    file_index_offset: int = 0,
 ) -> List[Dict[str, str]]:
     """
     导出被修改的文件到 OSS
@@ -140,6 +141,7 @@ async def _export_modified_files(
         tables: 文件集合
         modified_file_ids: 被修改的文件 ID 列表
         path_prefix: OSS 路径前缀
+        file_index_offset: 文件序号的起始偏移（用于生成 _1, _2 等后缀）
 
     Returns:
         导出文件列表：[{file_id, filename, url}, ...]
@@ -147,10 +149,18 @@ async def _export_modified_files(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_files = []
 
-    for file_id in modified_file_ids:
+    for idx, file_id in enumerate(modified_file_ids):
         try:
             file_info = tables.get_file_info(file_id)
-            filename = file_info["filename"]
+            original_filename = file_info["filename"]
+
+            # 为文件名加上序号后缀（如 _1, _2），避免同轮多次导出时覆盖
+            file_index = file_index_offset + idx + 1
+            if '.' in original_filename:
+                name, ext = original_filename.rsplit('.', 1)
+                filename = f"{name}_{file_index}.{ext}"
+            else:
+                filename = f"{original_filename}_{file_index}"
 
             # 导出单个文件到字节流
             excel_bytes = await asyncio.to_thread(tables.export_file_to_bytes, file_id)

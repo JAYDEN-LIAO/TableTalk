@@ -48,8 +48,9 @@
 #### 统一聊天入口
 
 - Web 端目前通过 `/chat` 统一入口进入后端。
-- 请求先做意图识别，再分流到聊天/澄清分支或处理分支。
-- `chat`、`analysis`、`processing`、`unclear` 四类意图已经存在。
+- Agent（ExcelAgent）使用 **Tool Calling 循环** 选择 conversation/clarification/processing/analysis 工具，替代早期意图分类+固定路由模式。
+- **v2 Guardrails**：迭代上限熔断、Token 预算追踪、停滞自校正（Jaccard 相似度检测）。
+- 多步推理：workflow 工具执行结果以结构化 JSON observation 注回上下文，Agent 可持续决策。
 
 #### 基于 LLM 的意图识别，而不是纯硬编码路由
 
@@ -57,17 +58,19 @@
 - 历史对话、文件继承、表头 schema 提取已经接入 `IntentService`。
 - 规则修正仍然存在，但主要是兜底和纠偏，不再是早期那种纯规则分发。
 
-#### 多轮上下文
+#### 多轮上下文与窗口管理
 
 - 系统已经具备 `Thread / ThreadTurn` 模型。
 - 支持历史轮次读取、文件继承、上下文快照保存。
 - `ContextService` 会按意图类型构建不同上下文。
+- **v2 窗口优化**：tiktoken 精确计数、三级压缩策略（L1 完整/L2 摘要/L3 结构化记录）、Schema 按需注入（query 关键词匹配）。
 
 #### Excel 处理流水线
 
 - 处理链路已经拆成标准阶段：`load -> generate -> validate -> execute -> export -> complete`。
 - SSE 事件流、阶段埋点、步骤持久化已经落地。
-- Excel 处理核心仍在同一仓库、同一后端进程内完成。
+- **v2 生成自校正**：validate 失败时先做错误分类（列名/语法/逻辑），再生成针对性修复提示（如列名错误给出候选列名），替代通用重试提示。
+- Excel 处理核心（tablo 包）已从 API 层解耦为独立 Python package。
 
 #### 统一 LLM Provider 抽象
 
@@ -82,6 +85,8 @@ llm-excel/
 ├── apps/
 │   ├── api/                 # FastAPI 后端
 │   └── web/                 # React Router + Vite 前端
+├── packages/
+│   └── tablo/               # 可复用 Excel 处理核心 (纯 Python)
 ├── docs/
 │   ├── design/              # 设计文档
 │   ├── specs/               # 协议与数据规格
@@ -114,34 +119,36 @@ llm-excel/
 - “分析但不修改数据”的能力边界还不稳定。
 - 后续如果要支持统计分析、报告生成、图表输出，会继续推高现有处理管线复杂度。
 
-### 3.3 当前不是 Agent Orchestrator，只是“LLM 驱动的路由编排”
+### 3.3 Agent 编排已部分落地（v2），但仍有扩展空间
 
-系统已经比早期规则路由更灵活，但目前仍然是：
+v2 已将系统从 “LLM 驱动的路由编排” 升级为 **Tool Calling Agent 循环**：
 
-1. 先分类意图。
-2. 再走预定义分支。
+- 4 个工具（conversation/clarification/processing/analysis）由 LLM 动态选择。
+- Workflow 工具执行后，结果以结构化 observation 注回上下文，支持多步推理。
+- 已具备 Agent 安全防护（迭代熔断、Token 预算、停滞自校正）。
 
-这和真正的 agent 编排还有明显差距：
+与完全 Agent Orchestrator 的剩余差距：
+- 工具集合仍为固定 4 个，不支持外部注册/动态扩展。
+- 不支持多工具并行调用（并行执行 processing + analysis）。
+- 编排层仍与 FastAPI SSE 协议强耦合。
 
-- 工具选择不是动态的。
-- 单次请求通常只会进入一条固定链路。
-- 没有多工具决策和组合执行能力。
+### 3.4 LLM 基础设施持续演进
 
-### 3.4 LLM 基础设施只完成了第一阶段抽象
-
-当前已经有：
+当前已有（v2）：
 
 - provider 抽象
 - stage 路由
 - 模型配置来自数据库
+- **Agent 熔断**（迭代上限 + Token 预算 + 停滞自校正）
+- **上下文窗口管理**（tiktoken 精确计数 + 三级压缩 + Schema 按需注入）
+- **LLM 生成自校正**（错误分类 + 针对性重试提示）
 
-但还缺少：
+仍可继续补齐：
 
-- fallback 策略
-- 成本统计
+- 成本统计（按 provider/model/stage 聚合）
 - 限流
 - 缓存
-- 更完整的 provider 可用性治理
+- 更完整的 provider fallback 策略
 
 ### 3.5 文档与实现容易脱节
 

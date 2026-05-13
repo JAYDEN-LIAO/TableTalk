@@ -61,6 +61,10 @@ const TaskWorkbench = ({ threadId }: TaskWorkbenchProps) => {
   const [showNewSessionDialog, setShowNewSessionDialog] = useState(false)
   // 最近一轮的产出文件（立即更新，不等 turns 重组）
   const [lastTurnOutputFiles, setLastTurnOutputFiles] = useState<OutputFileInfo[]>([])
+  // 所有历史产出文件（供"可处理文件"下拉选择）
+  const [processedFiles, setProcessedFiles] = useState<UserMessageAttachment[]>([])
+  // 当前从下拉选中的可处理文件列表（控制预览 + 轮次文件上下文）
+  const [selectedProcessingFiles, setSelectedProcessingFiles] = useState<UserMessageAttachment[]>([])
 
   // 文件上传
   const fileUpload = useFileUpload()
@@ -82,6 +86,17 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
   onExportSuccess: (files) => {
     setOutputFiles(files)
     setLastTurnOutputFiles(files)
+    // 将新导出的文件累加到 processedFiles（去重）
+    const newProcessed: UserMessageAttachment[] = files.map(f => ({
+      id: f.file_id,
+      filename: f.filename,
+      path: f.url,
+    }))
+    setProcessedFiles(prev => {
+      const existing = new Set(prev.map(f => f.id))
+      const unique = newProcessed.filter(nf => !existing.has(nf.id))
+      return [...prev, ...unique]
+    })
     setTaskState('done')
     setActiveTurnId(null)
     setPreviewTab('output')
@@ -147,19 +162,27 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
   const lastAssistantStatus = lastTurn?.assistantMessage?.status
 
   // 获取输入文件列表（用于预览面板）
-  // 包含：历史轮次中所有的输入文件 + 当前输入框中上传的文件
+  // 包含：历史轮次中所有的输入文件 + 当前输入框中上传的文件 + 当前从下拉选中的可处理文件
   const inputFiles = useMemo(() => {
     // 从历史轮次中收集所有输入文件
     const historyFiles = turns.flatMap(turn => turn.userMessage.files)
 
-    // 合并当前上传的文件，按 id 去重
-    const allFiles = [...historyFiles, ...fileUpload.uploadedFiles]
+    // 合并当前上传的文件 + 下拉选中的文件，按 id 去重
+    const merged = [...fileUpload.uploadedFiles, ...selectedProcessingFiles]
+    const seen = new Set<string>()
+    const uniqueUploaded = merged.filter(f => {
+      if (seen.has(f.id)) return false
+      seen.add(f.id)
+      return true
+    })
+
+    const allFiles = [...historyFiles, ...uniqueUploaded]
     const uniqueFiles = allFiles.filter(
       (file, index, self) => self.findIndex(f => f.id === file.id) === index
     )
 
     return uniqueFiles
-  }, [turns, fileUpload.uploadedFiles])
+  }, [turns, fileUpload.uploadedFiles, selectedProcessingFiles])
 
   // 加载历史任务
   const { mutate: loadThread } = useMutation({
@@ -220,10 +243,18 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
       if (latestOutputFiles.length > 0) {
         setOutputFiles(latestOutputFiles)
         setLastTurnOutputFiles(latestOutputFiles)
+        // 加载历史产出文件到 processedFiles
+        const histProcessed: UserMessageAttachment[] = latestOutputFiles.map(f => ({
+          id: f.file_id,
+          filename: f.filename,
+          path: f.url,
+        }))
+        setProcessedFiles(histProcessed)
         setTaskState('done')
       } else {
         setOutputFiles([])
         setLastTurnOutputFiles([])
+        setProcessedFiles([])
       }
 
       setMessages(loadedMessages)
@@ -245,6 +276,8 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
         fileUpload.clearFiles()
         setOutputFiles([])
         setLastTurnOutputFiles([])
+        setProcessedFiles([])
+        setSelectedProcessingFiles([])
         setTaskState('idle')
         setPreviewTab('input')
         loadThread(threadId)
@@ -260,6 +293,8 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
         clearMessages()
         fileUpload.clearFiles()
         setOutputFiles([])
+        setProcessedFiles([])
+        setSelectedProcessingFiles([])
         setTaskState('idle')
         setPreviewTab('input')
       }
@@ -284,20 +319,28 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
 
   // 实际执行发送消息的逻辑
   const doSendMessage = (targetThreadId?: string) => {
-    // 本轮上传的文件
-    let files: UserMessageAttachment[] = fileUpload.uploadedFiles.map(item => ({
-      id: item.id,
-      filename: item.filename,
-      path: item.path,
-    }))
+    // 优先使用用户从下拉选中的可处理文件
+    let files: UserMessageAttachment[]
 
-    // 无新上传时，自动以最近一轮的产出文件作为本次处理的文件
-    if (files.length === 0 && lastTurnOutputFiles.length > 0) {
-      files = lastTurnOutputFiles.map(f => ({
-        id: f.file_id,
-        filename: f.filename,
-        path: f.url,
+    if (selectedProcessingFiles.length > 0) {
+      // 以下拉选中文件为主
+      files = selectedProcessingFiles
+    } else {
+      // 本轮上传的文件
+      files = fileUpload.uploadedFiles.map(item => ({
+        id: item.id,
+        filename: item.filename,
+        path: item.path,
       }))
+
+      // 无新上传时，自动以最近一轮的产出文件作为本次处理的文件
+      if (files.length === 0 && lastTurnOutputFiles.length > 0) {
+        files = lastTurnOutputFiles.map(f => ({
+          id: f.file_id,
+          filename: f.filename,
+          path: f.url,
+        }))
+      }
     }
 
     // 生成新轮次 ID 并设为活跃
@@ -306,8 +349,9 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
 
     sendMessage({ text: query, files, thread_id: targetThreadId })
     setQuery('')
-    // 清空已上传的文件（下一轮需要重新上传或选择历史文件）
+    // 清空已上传的文件和选中状态（下一轮需要重新选择）
     fileUpload.clearFiles()
+    setSelectedProcessingFiles([])
     chatRef.current?.scrollToBottom()
   }
 
@@ -341,6 +385,9 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
     // 清空当前状态
     clearMessages()
     setOutputFiles([])
+    setLastTurnOutputFiles([])
+    setProcessedFiles([])
+    setSelectedProcessingFiles([])
     setTaskState('idle')
     setPreviewTab('input')
     setActiveTurnId(null)
@@ -355,6 +402,9 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
   // 清空对话
   const onClear = () => {
     setOutputFiles([])
+    setLastTurnOutputFiles([])
+    setProcessedFiles([])
+    setSelectedProcessingFiles([])
     setTaskState('idle')
     setPreviewTab('input')
     setActiveTurnId(null)
@@ -414,10 +464,13 @@ const { messages, sendMessage, setMessages, clearMessages, isProcessing } = useC
         <ResizablePanel defaultSize={60} minSize={40}>
           <PreviewPanel
             inputFiles={inputFiles}
+            processedFiles={processedFiles}
             outputFiles={outputFiles}
             isProcessing={isProcessing}
             activeTab={previewTab}
             onTabChange={setPreviewTab}
+            selectedProcessingFileIds={selectedProcessingFiles.map(f => f.id)}
+            onProcessingFilesChange={setSelectedProcessingFiles}
           />
         </ResizablePanel>
 

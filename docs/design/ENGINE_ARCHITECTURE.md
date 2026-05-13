@@ -431,7 +431,7 @@ class ExecutionResult:
    │ FileCollection  │ ← 两层结构，包含所有文件和 sheets
    └─────────────────┘
 
-2️⃣ 操作生成与验证（GenerateValidateStage 复合阶段）
+2️⃣ 操作生成与验证（GenerateValidateStage 复合阶段，v2 错误分类自校正）
    ┌─────────────────────────────────────┐
    │  GenerateValidateStage              │
    │  ┌─────────────────┐                │
@@ -444,6 +444,10 @@ class ExecutionResult:
    │  └────────┬────────┘               ││
    │           │                        ││
    │           ↓ 验证失败？             ││
+   │           │                        ││
+   │           ├─→ v2: classify_errors  ││
+   │           │   (COLUMN/SYNTAX/LOGIC)││
+   │           │   生成 targeted_hint   ││
    │           │                        ││
    │           ├─→ 是 且 重试<max：重试 ─┘│
    │           │                        │
@@ -820,7 +824,87 @@ height_cm = None
 
 ---
 
+---
+
+## 🔒 Agent 熔断与自校正 (2026-05 v2)
+
+### ExcelAgent Guardrails
+
+`ExcelAgent.run_stream()` 在 v2 中增加了三层防护：
+
+| 防护层 | 触发条件 | 行为 |
+|--------|---------|------|
+| **硬上限熔断** | `iteration > MAX_ITERATIONS` (5) | 终止循环，降级追问用户 |
+| **Token 预算追踪** | `cumulative_tokens > MAX_TOKENS_PER_TURN` (8000) | 终止循环，降级追问用户 |
+| **停滞自校正** | 连续两次 tool_call 的 args Jaccard 相似度 ≥ 0.7 | 替换决策为 clarification_response |
+
+**停滞检测算法**：对两次决策的 `tool_args` 做 Jaccard 相似度计算（基于 key-value 签名集合），>= `STAGNATION_SIMILARITY` (0.7) 时判定为循环卡死。对话类工具（conversation/clarification）自动跳过检测（因为它们执行后直接 return）。
+
+**熔断事件持久化**：触发熔断时，事件写入 `ThreadTurn.context_snapshot.guardrails`，包含 type/iteration/reason，供回归分析。
+
+### 上下文预算感知
+
+Agent 每次循环前检查 `count_messages(messages)`，超 `MAX_TOKENS_PER_TURN * 0.8` 阈值时自动触发 `compact_context_if_needed()` 压缩。
+
+---
+
+## 🔢 精确 Token 计数器
+
+### TokenCounter (`apps/api/app/engine/token_counter.py`)
+
+基于 OpenAI tiktoken (cl100k_base 编码) 的精确计数，替代传统的 char/4 估算。
+
+```python
+from app.engine.token_counter import get_token_counter
+
+counter = get_token_counter()
+tokens = counter.count("Hello world")         # → 2
+msg_tokens = counter.count_messages(messages)  # 自动加消息格式开销
+remaining = counter.remaining_budget(8000, used=3500)  # → 4500
+```
+
+---
+
+## 📐 上下文构建器 v2
+
+### ContextBuilder 增强
+
+`ContextBuilder` v2 新增能力：
+
+1. **精确 Token 计数** — `estimate_token_count()` 改为调用 tiktoken，不再使用 char/4
+2. **三级压缩** — `compact_history_messages()`：L1 最近 2 对完整保留，L2 更早消息结构化摘要，L3 超出预算硬截断
+3. **Schema 按需注入** — `filter_schema_for_query()`：将 query 分词后与列名匹配，匹配到的完整保留，未匹配的压缩为 `(N 列)`
+4. **预算感知压缩** — `compact_context_if_needed()`：先压 schema 再压消息，返回压缩结果 + 预算报告
+
+### 结构化 Tool Observation (`_format_tool_observation_v2`)
+
+替代旧版纯文本 observation，输出结构化 JSON：
+
+```json
+{
+  "tool": "processing_workflow",
+  "status": "success",
+  "summary": "工作流完成，修改了 1 个文件",
+  "file_changes": [{"filename": "orders_1.xlsx", "url_present": true}],
+  "variables": {"total": 1000},
+  "errors": []
+}
+```
+
+Token 预算感知：observation 超出预算时自动降级为最小摘要（仅 `status + summary + counts`）。
+
+---
+
 ## 📝 更新日志
+
+### 2026-05 v2 Agent 改进
+
+- 新增 `TokenCounter` 类（tiktoken 封装），替代 char/4 估算
+- `ContextBuilder` v2：三级压缩、Schema 按需注入、预算感知
+- `ExcelAgent` v2：迭代上限熔断、Token 预算追踪、停滞自校正
+- `GenerateValidateStage` v2：错误分类（COLUMN/SYNTAX/LOGIC）+ 针对性修复提示
+- 结构化 Tool Observation：JSON 格式 + Token 预算感知裁剪
+- 熔断事件写入 `context_snapshot.guardrails`
 
 ### 2026-01-30 改进
 

@@ -7,7 +7,7 @@ from app.services import processor_stream
 
 
 class FakeLLMClient:
-    def generate_operations(self, query, analysis, schemas, previous_errors=None, previous_json=None):
+    def generate_operations(self, query, analysis, schemas, previous_errors=None, previous_json=None, targeted_hint=None):
         return json.dumps(
             {
                 "operations": [
@@ -23,8 +23,8 @@ class FakeLLMClient:
             ensure_ascii=False,
         )
 
-    def generate_operations_stream(self, query, analysis, schemas, previous_errors=None, previous_json=None):
-        payload = self.generate_operations(query, analysis, schemas, previous_errors, previous_json)
+    def generate_operations_stream(self, query, analysis, schemas, previous_errors=None, previous_json=None, targeted_hint=None):
+        payload = self.generate_operations(query, analysis, schemas, previous_errors, previous_json, targeted_hint)
         yield "", payload
 
 

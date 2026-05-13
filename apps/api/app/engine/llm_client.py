@@ -344,6 +344,7 @@ class LLMClient:
         table_schemas: Optional[Dict[str, Dict[str, str]]] = None,
         previous_errors: Optional[List[str]] = None,
         previous_json: Optional[str] = None,
+        targeted_hint: Optional[str] = None,
     ) -> str:
         """
         第二步：根据需求分析生成操作描述
@@ -354,6 +355,7 @@ class LLMClient:
             table_schemas: 表结构信息
             previous_errors: 之前验证失败的错误列表（用于重试时提供上下文）
             previous_json: 之前生成的 JSON（用于重试时提供上下文）
+            targeted_hint: v2 针对性修复提示（错误分类后的具体指引）
 
         Returns:
             JSON 格式的操作描述
@@ -377,7 +379,11 @@ class LLMClient:
             user_message += "验证错误：\n"
             for error in previous_errors:
                 user_message += f"- {error}\n"
-            user_message += "\n请根据错误信息修正 JSON，确保所有字段名、表名、列名都正确。"
+            # v2: 附加针对性修复提示
+            if targeted_hint:
+                user_message += f"\n{targeted_hint}\n"
+            else:
+                user_message += "\n请根据错误信息修正 JSON，确保所有字段名、表名、列名都正确。"
 
         try:
             result = self._call_llm("generate", system_prompt, user_message)
@@ -392,6 +398,7 @@ class LLMClient:
         table_schemas: Optional[Dict[str, Dict[str, str]]] = None,
         previous_errors: Optional[List[str]] = None,
         previous_json: Optional[str] = None,
+        targeted_hint: Optional[str] = None,
     ) -> Generator[Tuple[str, str], None, None]:
         """
         第二步：根据需求分析生成操作描述（流式输出，同步版本）
@@ -402,6 +409,7 @@ class LLMClient:
             table_schemas: 表结构信息
             previous_errors: 之前验证失败的错误列表（用于重试时提供上下文）
             previous_json: 之前生成的 JSON（用于重试时提供上下文）
+            targeted_hint: v2 针对性修复提示（错误分类后的具体指引）
 
         Yields:
             Tuple[str, str]: (delta, full_content) - 增量内容和累积的完整内容
@@ -460,12 +468,15 @@ class LLMClient:
 
             return schema_text
 
-        def build_error_feedback_message(errors: List[str]) -> str:
-            """构建错误反馈消息"""
+        def build_error_feedback_message(errors: List[str], hint: Optional[str] = None) -> str:
+            """构建错误反馈消息（v2: 支持针对性修复提示）"""
             feedback = "⚠️ 你生成的 JSON 验证失败，请修正以下错误：\n\n"
             for error in errors:
                 feedback += f"- {error}\n"
-            feedback += "\n请根据错误信息修正 JSON，确保所有字段名、表名、列名都正确。只输出修正后的 JSON。"
+            if hint:
+                feedback += f"\n{hint}\n"
+            else:
+                feedback += "\n请根据错误信息修正 JSON，确保所有字段名、表名、列名都正确。只输出修正后的 JSON。"
             return feedback
 
         # 构建消息列表
@@ -479,7 +490,7 @@ class LLMClient:
             messages = [
                 {"role": "user", "content": initial_message},
                 {"role": "assistant", "content": previous_json},
-                {"role": "user", "content": build_error_feedback_message(previous_errors)}
+                {"role": "user", "content": build_error_feedback_message(previous_errors, targeted_hint)}
             ]
             try:
                 for delta, full_content in self._call_llm_stream("generate", system_prompt, messages=messages):

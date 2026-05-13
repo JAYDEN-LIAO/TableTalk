@@ -8,10 +8,11 @@
 
 1. 上传 Excel 文件
 2. 用自然语言描述数据处理需求
-3. 大模型生成结构化 JSON 操作（非直接生成公式）
-4. 引擎执行操作，产出带有真实公式的 Excel 文件
+3. **Agent**（ExcelAgent）通过 Tool Calling 路由 —— 对话 / 澄清 / 处理 / 分析
+4. 大模型生成结构化 JSON 操作（非直接生成公式），带错误分类的自动重试
+5. 引擎执行操作，产出带有真实公式的 Excel 文件
 
-所有公式 100% 可复现 —— 不直接执行 LLM 生成的代码。
+Agent 内置熔断防护：迭代上限、Token 预算、停滞自校正。所有公式 100% 可复现 —— 不直接执行 LLM 生成的代码。
 
 ## 技术栈
 
@@ -111,9 +112,9 @@ selgetabel/
 │   │   ├── app/
 │   │   │   ├── main.py        # 应用入口
 │   │   │   ├── api/routes/    # 路由处理
-│   │   │   ├── engine/        # 核心：解析器、执行器、公式生成、意图分类器
+│   │   │   ├── engine/        # 核心：解析器、执行器、公式生成、Token 计数器、上下文构建器
 │   │   │   ├── processor/     # 处理流水线阶段
-│   │   │   ├── services/      # 业务逻辑：聊天、意图、上下文、文件 I/O、认证
+│   │   │   ├── services/      # 业务逻辑：Agent、聊天、上下文、文件 I/O、认证
 │   │   │   ├── persistence/   # 数据访问层
 │   │   │   ├── models/        # SQLAlchemy ORM 模型
 │   │   │   └── core/          # 配置、数据库、JWT
@@ -125,6 +126,8 @@ selgetabel/
 │       │   ├── features/      # 功能模块
 │       │   └── lib/           # 工具函数 & API 客户端
 │       └── vite.config.ts
+├── packages/
+│   └── tablo/         # 可复用 Excel 处理核心（纯 Python）
 ├── docker/            # Docker Compose 部署
 ├── docs/              # 技术文档
 │   ├── design/        # 系统设计与架构
@@ -137,15 +140,16 @@ selgetabel/
 ```
 
 **核心引擎组件：**
-- `intent_classifier.py` — 基于 LLM 的意图分类（CHAT/ANALYSIS/PROCESSING/UNCLEAR）
-- `context_builder.py` — 根据意图类型格式化 LLM 提示词上下文
+- `context_builder.py` — 根据意图类型格式化 LLM 提示词上下文（v2：tiktoken 精确计数、三级压缩、Schema 按需注入）
 - `excel_generator.py` — 将 JSON 表达式转换为 Excel 公式
 - `llm_client.py` — 统一的 LLM API 接口，支持多供应商
+- `token_counter.py` — 基于 tiktoken 的精确 Token 计数（替代 char/4 估算）
 
 **核心服务：**
-- `intent_service.py` — 编排意图识别和路由决策
+- `excel_agent.py` — **Agent 编排器**：Tool Calling 循环（4 工具）、熔断防护（迭代上限/Token 预算/停滞自校正）、结构化 Observation
 - `context_service.py` — 管理多轮对话上下文
-- `chat_stream.py` — 为非处理类意图流式返回聊天响应
+- `chat_stream.py` — 为对话/澄清工具流式返回聊天响应
+- `processor_stream.py` — 统一的 Excel 处理管线（load→generate→validate→execute→export）
 
 ### LLM 多供应商
 
@@ -167,23 +171,20 @@ selgetabel/
 
 详见 [LLM Provider 设计文档](docs/design/LLM_PROVIDER_DESIGN.md)。
 
-### 意图分类
+### Agent 架构
 
-系统使用基于 LLM 的意图分类来理解用户查询并合理路由：
+系统使用 **Tool Calling Agent**（ExcelAgent）替代传统的意图分类：
 
-| 意图        | 说明                                         |
-| ----------- | -------------------------------------------- |
-| `chat`      | 纯对话，不涉及文件处理（如打招呼、功能咨询等） |
-| `analysis`  | 数据分析/总结，不修改数据                     |
-| `processing`| 数据处理，修改/转换/导出数据                 |
-| `unclear`   | 需求不明确或缺少参数，需要进一步澄清          |
+| 工具 | 说明 |
+|------|------|
+| `conversation_response` | 直接回答一般性问题，不涉及文件处理 |
+| `clarification_response` | 需求不明确时提出追问 |
+| `processing_workflow` | 执行完整处理管线（修改/转换/导出数据） |
+| `analysis_workflow` | 执行分析管线（汇总/分析数据，不修改） |
 
-**分类规则：**
-- 未上传文件时，意图不能为 `analysis` 或 `processing`，必须为 `chat`
-- 如果用户指令模糊（如只说了"分组"但没说按哪列分组），系统返回 `unclear` 并附带澄清问题
-- 如果用户给出简短回复如"是"、"对"或仅提供一个列名，系统继承上一轮对话的意图
+**熔断防护：** Agent 循环强制最多 5 次迭代、Token 预算追踪（基于 tiktoken）、停滞自校正（检测连续相同工具调用且参数相似度 ≥70% → 自动追问）。
 
-**澄清流程：** 当意图为 `unclear` 或需要澄清时，系统会先友好地提出追问，再继续执行。
+**多步推理：** 工作流工具结果以结构化 JSON observation 注回上下文，Agent 可继续决策。
 
 ### 多轮对话
 
@@ -191,10 +192,10 @@ selgetabel/
 
 - **Thread**：包含多个 Turn 的会话
 - **Turn**：一次交互（用户查询 → 系统响应）
-- **上下文快照**：每个 Turn 可以保存其上下文状态供后续参考
+- **上下文快照**：每个 Turn 保存上下文状态（v2：含熔断事件记录）
 - **文件继承**：当用户在新的 Turn 中未上传文件时，系统自动继承之前的文件
 
-**上下文类型** 根据意图类型构建：
+**上下文类型** 根据意图构建（v2：三级压缩、按需注入列信息）：
 - `chat`：对话历史、话题连续性分析
 - `analysis`：历史分析记录、数据洞察、文件分析历史
 - `processing`：操作历史、数据状态、可用文件、文件依赖关系
@@ -204,12 +205,12 @@ selgetabel/
 后端通过 SSE 事件流推送多阶段处理进度：
 
 ```
-意图识别 → 生成 + 验证（LLM，带自动重试）→ 执行 → 导出
+Agent 工具调用 → 生成 + 验证（LLM，带分类重试）→ 执行 → 导出
 ```
 
-- **意图识别**：LLM 分类用户意图（chat/analysis/processing/unclear）
-- **生成**：LLM 将自然语言转换为结构化 JSON 操作
-- **验证**：解析器校验格式并检查函数白名单（验证失败时自动重试）
+- **Agent 工具调用**：Agent 选择 processing_workflow 或 analysis_workflow（带熔断防护）
+- **生成**：LLM 将自然语言转换为结构化 JSON 操作（v2：错误分类 → 针对性修复提示：列名错误/语法错误/逻辑错误）
+- **验证**：解析器校验格式并检查函数白名单（v2：分类错误 → 针对性修复指引）
 - **执行**：引擎运行操作并生成 Excel 公式
 - **导出**：输出带有嵌入公式的 `.xlsx` 文件
 
