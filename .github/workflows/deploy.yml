@@ -13,18 +13,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Package code
-        run: tar czf /tmp/app.tar.gz \
-          --exclude='.git' \
-          --exclude='**/node_modules' \
-          --exclude='**/.venv' \
-          --exclude='**/__pycache__' \
-          --exclude='**/*.pyc' \
-          --exclude='**/.turbo' \
-          --exclude='**/build' \
-          --exclude='**/.react-router' \
-          --exclude='docker/postgres_data' \
-          --exclude='docker/minio_data' \
-          .
+        run: |
+          tar czf /tmp/app.tar.gz \
+            --exclude='.git' \
+            --exclude='**/node_modules' \
+            --exclude='**/.venv' \
+            --exclude='**/__pycache__' \
+            --exclude='**/*.pyc' \
+            --exclude='**/.turbo' \
+            --exclude='**/build' \
+            --exclude='**/.react-router' \
+            --exclude='docker/postgres_data' \
+            --exclude='docker/minio_data' \
+            .
 
       - name: Setup SSH
         run: |
