@@ -390,7 +390,7 @@ class ExcelAgent:
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=registry.schemas,
-                tool_choice="required",
+                tool_choice="auto",
             )
             if not response.tool_calls:
                 return None
@@ -675,7 +675,7 @@ class ExcelAgent:
             system_prompt=system_prompt,
             messages=messages,
             tools=registry.schemas,
-            tool_choice="required",
+            tool_choice="auto",
         )
         if not response.tool_calls:
             return None
