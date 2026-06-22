@@ -8,7 +8,7 @@ export const BOB_RELEASE = import.meta.env.VITE_BOB_RELEASE === true;
 // 品牌配置
 const BRAND = {
   default: {
-    name: "Selgetabel",
+    name: "Table Talk",
     description: "AI 驱动的 Excel 智能处理",
     footer: "让数据处理更简单。",
   },
