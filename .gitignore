@@ -4,6 +4,7 @@ docker/postgres_data/
 .turbo
 node_modules
 .env
+.env.production
 
 # 自动生成的版本文件
 apps/api/app/__version__.py
