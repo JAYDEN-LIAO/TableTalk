@@ -1,76 +1,59 @@
-name: Build & Deploy
+name: Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_TAG: ${{ github.sha }}
-
 jobs:
-  build-and-push:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup lowercase image name
-        run: |
-          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      - name: Package code
+        run: tar czf /tmp/app.tar.gz \
+          --exclude='.git' \
+          --exclude='**/node_modules' \
+          --exclude='**/.venv' \
+          --exclude='**/__pycache__' \
+          --exclude='**/*.pyc' \
+          --exclude='**/.turbo' \
+          --exclude='**/build' \
+          --exclude='**/.react-router' \
+          --exclude='docker/postgres_data' \
+          --exclude='docker/minio_data' \
+          .
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & push API
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./apps/api/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:${{ env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
-
-      - name: Build & push Web
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./apps/web/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:${{ env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:latest
-
-      - name: Setup SSH key
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p ${{ secrets.SERVER_SSH_PORT }} ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy to server
+      - name: Upload & deploy
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.SERVER_SSH_PORT }} root@${{ secrets.SERVER_HOST }} "
+          scp -P ${{ secrets.SERVER_SSH_PORT }} /tmp/app.tar.gz root@${{ secrets.SERVER_HOST }}:/opt/selgetabel/
+          ssh -p ${{ secrets.SERVER_SSH_PORT }} root@${{ secrets.SERVER_HOST }} "
             set -e
-            cd /opt/selgetabel/docker
+            cd /opt/selgetabel
+            mkdir -p docker/postgres_data docker/minio_data
 
-            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+            # 保留 .env 和数据库/存储数据
+            cp docker/.env /tmp/selgetabel-env-backup 2>/dev/null || true
 
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:latest
+            # 解压新代码
+            rm -rf apps packages docker/docker-compose.deploy.yml docker/nginx docker/scripts
+            tar xzf app.tar.gz
+            rm -f app.tar.gz
 
-            docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest selgetabel-api:latest
-            docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:latest selgetabel-web:latest
+            # 恢复 .env
+            cp /tmp/selgetabel-env-backup docker/.env 2>/dev/null || true
 
+            # 构建并重启（使用国内镜像加速）
+            cd docker
+            docker compose -f docker-compose.deploy.yml build --no-cache api web
             docker compose -f docker-compose.deploy.yml up -d --no-build api web
           "
