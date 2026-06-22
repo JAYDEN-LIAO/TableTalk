@@ -25,6 +25,9 @@ jobs:
             --exclude='**/.react-router' \
             --exclude='docker/postgres_data' \
             --exclude='docker/minio_data' \
+            --exclude='fixtures' \
+            --exclude='selgetabel-full' \
+            --exclude='temp' \
             .
 
       - name: Setup SSH
@@ -34,26 +37,28 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p ${{ secrets.SERVER_SSH_PORT }} ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Upload & deploy
+      - name: Upload code
         run: |
-          scp -P ${{ secrets.SERVER_SSH_PORT }} /tmp/app.tar.gz root@${{ secrets.SERVER_HOST }}:/opt/selgetabel/
+          scp -P ${{ secrets.SERVER_SSH_PORT }} /tmp/app.tar.gz root@${{ secrets.SERVER_HOST }}:/tmp/tabletalk-deploy.tar.gz
+
+      - name: Deploy
+        run: |
           ssh -p ${{ secrets.SERVER_SSH_PORT }} root@${{ secrets.SERVER_HOST }} "
             set -e
             cd /opt/selgetabel
-            mkdir -p docker/postgres_data docker/minio_data
 
-            # 保留 .env 和数据库/存储数据
-            cp docker/.env /tmp/selgetabel-env-backup 2>/dev/null || true
+            # 保留数据
+            cp docker/.env /tmp/talk-env 2>/dev/null || true
 
             # 解压新代码
-            rm -rf apps packages docker/docker-compose.deploy.yml docker/nginx docker/scripts
-            tar xzf app.tar.gz
-            rm -f app.tar.gz
+            rm -rf apps packages docker/docker-compose.deploy.yml
+            tar xzf /tmp/tabletalk-deploy.tar.gz
+            rm -f /tmp/tabletalk-deploy.tar.gz
 
             # 恢复 .env
-            cp /tmp/selgetabel-env-backup docker/.env 2>/dev/null || true
+            cp /tmp/talk-env docker/.env 2>/dev/null || true
 
-            # 构建并重启（使用国内镜像加速）
+            # 构建并重启
             cd docker
             docker compose -f docker-compose.deploy.yml build --no-cache api web
             docker compose -f docker-compose.deploy.yml up -d --no-build api web
